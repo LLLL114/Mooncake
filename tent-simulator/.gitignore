@@ -1,0 +1,24 @@
+# Runtime artifacts must be placed in MOONCAKE_TENT_OUTPUT.
+/build/
+/runs/
+/reports/
+/cache/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.o
+*.a
+*.so
+*.log
+*.stderr
+*.csv
+*.svg
+*.png
+*.bin
+*.bin.gz
+*manifest*.json
+*summary*.json
+checks.json
+rows.json
+index.json
+*.config.json

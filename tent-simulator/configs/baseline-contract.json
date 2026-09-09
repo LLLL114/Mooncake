@@ -1,0 +1,25 @@
+{
+  "baseline_commit": "1c65ced88e509440e31ea88a76594660461d0eab",
+  "experiment_branch": "experiment/rdma-multirail-baseline",
+  "source": "mooncake-transfer-engine/tent",
+  "original_defaults": {
+    "smart": true,
+    "old_value_alpha": 0.01,
+    "numa_penalties": [1.0, 5.0, 10.0],
+    "priority_filtering": true,
+    "priority_rotation_us": 200,
+    "score_jitter_range": 1e-9,
+    "score_epsilon": 1e-12,
+    "ewma_clamp_multipliers": [0.1, 10.0],
+    "aggregate_probe_every_calls": 100
+  },
+  "p01_fixture_overrides": {
+    "priority_filtering": false,
+    "topology": "all host-memory rails in priority rank 0, NUMA 0",
+    "bandwidth_seed_gbps_per_nic": 100,
+    "allocation": "explicit aggregate selector API; not transport slicing",
+    "shared_quota": "not enabled"
+  },
+  "result_label": "simulation",
+  "not_a_b0_performance_run": true
+}
