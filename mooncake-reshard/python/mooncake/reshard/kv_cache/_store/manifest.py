@@ -233,7 +233,7 @@ class KVCacheStoreManifest:
 
     @cached_property
     def model_domain(self) -> str:
-        """Exclude TP/PP geometry so layouts share one discovery directory."""
+        """Share discovery across TP/PP geometry and physical axis orders."""
         return _canonical_digest(
             {
                 "namespace": self.namespace,
@@ -241,7 +241,9 @@ class KVCacheStoreManifest:
                 "model_revision": self.model_revision,
                 "semantic_fingerprint": self.semantic_fingerprint,
                 "descriptor": asdict(self.layout.descriptor),
-                "object_format": self.layout.object_format,
+                # Keep the original PLHD namespace stable. Physical axis order
+                # belongs to the layout ID, not the identity of the logical KV.
+                "object_format": KVCacheStoreFormat.PLHD,
             }
         )
 

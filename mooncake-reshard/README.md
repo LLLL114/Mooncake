@@ -196,3 +196,34 @@ Store manifests cache immutable digests; discovery caches parsed catalogs only
 while their freshly read contents and CAS version agree. Object existence and
 replica leases are still checked per operation. Derived caches are excluded from
 canonical dataclass serialization, so page/object identities do not change.
+
+## KV Store physical layout conversion
+
+Readers can restore any stored PLHD, LPHD or HPLD object order into any of those
+three runtime orders, including simultaneous TP/PP changes and replicated GQA
+heads. Source object strides come from the immutable source manifest; destination
+strides and allocation bounds come from the framework runtime binding. Both
+`load()` and `prepare_page_reader()` support conversion and mixed-layout pages.
+The latter caches the conversion template per source layout for its fixed target
+binding. Source payloads remain in their native layout; no rewritten copy is
+persisted in Store.
+
+Physical order is isolated by the layout digest in every object key, while the
+model discovery domain is shared. Models, weight revisions, semantic
+fingerprints, dtype, page size, head dimensions and logical descriptors must
+still agree. This is a byte permutation, not dtype/quantization conversion.
+
+In SGLang the existing adapter maps `page_first` to PLHD, `page_first_direct` and
+`layer_first` to LPHD, and `page_head` to HPLD. Writer and reader can independently
+select their HiCache memory layout; the adapter supplies actual pool strides
+without a new conversion option. For `page_first_direct`, select the framework's
+direct I/O backend. `layer_first` additionally needs the reshard-aware SGLang
+startup resolver and an explicit `kv_reshard` backend configuration. Older
+SGLang resolvers rewrite Mooncake `layer_first` to a page-first layout; on those
+versions, use `page_first_direct` for LPHD instead.
+
+Upgrade all participants before sharing a mixed-format catalog. The shared domain
+retains the previous PLHD identity, so existing PLHD manifests and page keys stay
+valid. Older LPHD/HPLD caches used separate format-specific domains and must be
+rewarmed after upgrading; old serialized LPHD/HPLD manifests are rejected by
+their domain checks. No existing object is renamed or silently reinterpreted.

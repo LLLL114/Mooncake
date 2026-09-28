@@ -194,7 +194,7 @@ def test_tp1pp3_to_tp2pp2_read_splits_layers_and_heads(fmt):
     assert {f.object_index for f in local} == {0, 1, 2, 3}
 
 
-def test_shared_domain_excludes_layout_but_includes_semantics_and_format():
+def test_shared_domain_excludes_layout_and_format_but_includes_semantics():
     first = _manifest(_layout(1))
     other = _manifest(_layout(2, ((0, 1, 2, 3),)))
     assert first.layout != other.layout
@@ -206,7 +206,7 @@ def test_shared_domain_excludes_layout_but_includes_semantics_and_format():
         assert replace(first, **{name: "different"}).model_domain != first.model_domain
     assert (
         replace(first, layout=_layout(fmt=FORMATS[1])).model_domain
-        != first.model_domain
+        == first.model_domain
     )
 
 
@@ -344,8 +344,10 @@ def test_plan_identity_and_unsupported_conversions():
     )
     with pytest.raises(TypeError):
         plan_kv_cache_store_upload(runtime, layout, object_format=FORMATS[0])
-    with pytest.raises(ValueError, match="cross-pool"):
-        plan_kv_cache_store_load(layout, runtime, runtime_format=FORMATS[1])
+    assert (
+        plan_kv_cache_store_load(layout, runtime, runtime_format=FORMATS[1]).ranges
+        == load.ranges
+    )
     with pytest.raises(ValueError, match="descriptors differ"):
         plan_kv_cache_store_load(
             layout,

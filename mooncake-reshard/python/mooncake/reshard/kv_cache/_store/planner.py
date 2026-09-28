@@ -158,9 +158,11 @@ class KVCacheStoreLoadPlan:
         if not isinstance(layout, KVCacheStoreLayout):
             raise ValueError("layout must be a KVCacheStoreLayout")  # noqa: TRY004
         if not isinstance(runtime_format, KVCacheStoreFormat):
-            raise ValueError("runtime_format must be a KVCacheStoreFormat")  # noqa: TRY004
-        if runtime_format is not layout.object_format:
-            raise ValueError("cross-pool-format reshard is unsupported")
+            raise ValueError(
+                "runtime_format must be a KVCacheStoreFormat"
+            )  # noqa: TRY004
+        # Source fragments retain their stored strides. Destination strides
+        # come from the validated runtime binding during range lowering.
         selected, parts = _selected_parts(
             target_placement, target_dp_rank, replicas=True
         )

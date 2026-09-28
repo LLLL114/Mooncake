@@ -172,7 +172,8 @@ def test_native_metadata_conditional_update(cluster):
 
 
 @pytest.mark.parametrize("fmt", tuple(KVCacheStoreFormat))
-def test_native_single_process_tp_pp_restore(cluster, fmt):
+@pytest.mark.parametrize("target_fmt", tuple(KVCacheStoreFormat))
+def test_native_single_process_tp_pp_restore(cluster, fmt, target_fmt):
     addresses, _, _ = cluster
     raw = _real(addresses)
     placement = _placement("source", ((0,), (1, 2), (3,)), 1)
@@ -193,13 +194,16 @@ def test_native_single_process_tp_pp_restore(cluster, fmt):
                     True,
                 )
         reader = KVCacheStore(
-            raw, _manifest(plan_kv_cache_store_upload(target, object_format=fmt).layout)
+            raw,
+            _manifest(
+                plan_kv_cache_store_upload(target, object_format=target_fmt).layout
+            ),
         )
         context = reader.discover(keys, operation_id="read")
         assert len(context.page_keys) == 2
         for part in target.parts:
             with _bound(
-                raw, target, part.participant_id, fmt, 2, "read", fill=False
+                raw, target, part.participant_id, target_fmt, 2, "read", fill=False
             ) as (binding, buffers, expected):
                 assert reader.load(context, target, binding) == 2
                 assert [bytes(buffer) for buffer in buffers] == expected
