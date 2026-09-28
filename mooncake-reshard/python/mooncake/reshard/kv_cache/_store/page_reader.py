@@ -211,6 +211,11 @@ class KVCacheStorePageReader:
         limits = self.store.transfer_limits
         if count > limits.max_operations or size > limits.max_bytes:
             raise ValueError("Store transfer limit exceeded")
+        read_ranges = self.store.backend.ranged_reader(
+            key + template.suffix
+            for key, layout_id in zip(context.page_keys, context.layout_ids)
+            for template in templates[layout_id]
+        )
         success = [True] * len(offsets)
         remaining = [len(templates[i]) for i in context.layout_ids]
         batch: list[tuple[int, str, int, _ObjectRead]] = []
@@ -226,7 +231,7 @@ class KVCacheStorePageReader:
                 ):
                     if cancelled is not None and cancelled():
                         return 0
-                    self._read(batch, success, remaining)
+                    self._read(batch, success, remaining, read_ranges)
                     batch, operations, used = [], 0, 0
                 batch.append(
                     (
@@ -239,7 +244,7 @@ class KVCacheStorePageReader:
                 operations += n
                 used += size
         if batch and not (cancelled is not None and cancelled()):
-            self._read(batch, success, remaining)
+            self._read(batch, success, remaining, read_ranges)
         if cancelled is not None and cancelled():
             return 0
         return next(
@@ -252,6 +257,7 @@ class KVCacheStorePageReader:
         batch: list[tuple[int, str, int, _ObjectRead]],
         success: list[bool],
         remaining: list[int],
+        read_ranges: Callable[..., list[list[list[int]]]],
     ) -> None:
         native = self.store.backend.store
         whole = all(row[3].whole for row in batch)
@@ -293,7 +299,7 @@ class KVCacheStorePageReader:
         ]
         src = [[list(t.sources) for _, _, _, t in row] for row in rows.values()]
         sizes = [[list(t.sizes) for _, _, _, t in row] for row in rows.values()]
-        results = native.get_into_ranges(buffers, keys, dst, src, sizes)
+        results = read_ranges(buffers, keys, dst, src, sizes)
         if len(results) != len(rows):
             raise KVCacheStoreError("native read result shape differs")
         for row, response in zip(rows.values(), results):

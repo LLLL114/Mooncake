@@ -16,6 +16,7 @@ import pytest
 from mooncake.reshard.kv_cache import (
     KVCacheStore,
     KVCacheStoreFormat,
+    KVCacheTransferLimits,
     plan_kv_cache_store_upload,
 )
 from test_kv_cache_reshard import _placement
@@ -202,6 +203,78 @@ def test_native_single_process_tp_pp_restore(cluster, fmt):
             ) as (binding, buffers, expected):
                 assert reader.load(context, target, binding) == 2
                 assert [bytes(buffer) for buffer in buffers] == expected
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_native_multi_batch_snapshot_restore(cluster, prepared):
+    addresses, _, _ = cluster
+    raw = _real(addresses)
+    fmt = KVCacheStoreFormat.PLHD
+    source = _placement("snapshot-source", ((0, 1),), 1)
+    target = _placement("snapshot-target", ((0, 1),), 2)
+    plan = plan_kv_cache_store_upload(source, object_format=fmt)
+    writer = KVCacheStore(raw, _manifest(plan.layout))
+    key = uuid.uuid4().hex
+
+    class CountedStore:
+        def __init__(self):
+            self.snapshots = []
+            self.reads = []
+
+        def __getattr__(self, name):
+            return getattr(raw, name)
+
+        def prepare_get_into_ranges_snapshot(self, keys):
+            snapshot = raw.prepare_get_into_ranges_snapshot(keys)
+            self.snapshots.append(snapshot)
+            return snapshot
+
+        def get_into_ranges_from_snapshot(self, snapshot, *args):
+            self.reads.append(snapshot)
+            return raw.get_into_ranges_from_snapshot(snapshot, *args)
+
+        def get_into_ranges(self, *args):
+            raise AssertionError("unexpected ordinary ranged read")
+
+    counted = CountedStore()
+    try:
+        writer.register_layout()
+        with _bound(raw, source, source.parts[0].participant_id, fmt, 1, "put") as (
+            binding,
+            _,
+            _,
+        ):
+            assert writer.upload(plan, (key,), binding, operation_id="put") == (True,)
+        reader = KVCacheStore(
+            counted,
+            _manifest(plan_kv_cache_store_upload(target, object_format=fmt).layout),
+            transfer_limits=KVCacheTransferLimits(max_batch_operations=2),
+        )
+        context = reader.discover((key,), operation_id="get")
+        with _bound(
+            raw, target, target.parts[0].participant_id, fmt, 1, "get", fill=False
+        ) as (binding, buffers, expected):
+            page_reader = (
+                reader.prepare_page_reader(target, binding) if prepared else None
+            )
+            for _ in range(2):
+                previous_reads = len(counted.reads)
+                hits = (
+                    page_reader.load(
+                        context, [{r.region_id: 0 for r in binding.regions}]
+                    )
+                    if page_reader is not None
+                    else reader.load(context, target, binding)
+                )
+                assert hits == 1
+                assert [bytes(buffer) for buffer in buffers] == expected
+                assert len(counted.reads) - previous_reads > 1
+                assert all(
+                    s is counted.snapshots[-1] for s in counted.reads[previous_reads:]
+                )
+            assert len(counted.snapshots) == 2
     finally:
         raw.close()
 

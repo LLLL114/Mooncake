@@ -50,7 +50,9 @@ class KVCacheStoreReadContext:
     def __post_init__(self) -> None:
         require_nonempty_string(self.operation_id, "operation_id")
         if not isinstance(self.catalog, KVCacheStoreLayoutCatalog):
-            raise ValueError("catalog must be a KVCacheStoreLayoutCatalog")  # noqa: TRY004
+            raise ValueError(
+                "catalog must be a KVCacheStoreLayoutCatalog"
+            )  # noqa: TRY004
         pages = require_manifest_items(self.page_keys, "page_keys", str)
         for key in pages:
             require_nonempty_string(key, "page_key")
@@ -168,6 +170,9 @@ class KVCacheStore:
             OrderedDict()
         )
         self._lock = RLock()
+        self._catalog_cache: (
+            tuple[bytes | None, str, KVCacheStoreLayoutCatalog] | None
+        ) = None
 
     def register_layout(self) -> KVCacheStoreLayoutEntry:
         catalog, token = _read_catalog(self.backend, self.manifest.model_domain)
@@ -344,7 +349,24 @@ class KVCacheStore:
                 (),
                 (),
             )
-        catalog, _ = _read_catalog(self.backend, self.manifest.model_domain)
+        # Read the version every time; only immutable parsing/validation is cached.
+        domain = self.manifest.model_domain
+        data, token = self.backend.read_catalog(
+            KVCacheStoreLayoutCatalog(domain).catalog_key
+        )
+        with self._lock:
+            cached_catalog = self._catalog_cache
+            if cached_catalog is not None and cached_catalog[:2] == (data, token):
+                catalog = cached_catalog[2]
+            else:
+                catalog = (
+                    KVCacheStoreLayoutCatalog(domain)
+                    if data is None
+                    else kv_cache_store_catalog_from_json(data.decode("utf-8"))
+                )
+                if catalog.model_domain != domain:
+                    raise KVCacheStoreError("catalog model domain differs")
+                self._catalog_cache = (data, token, catalog)
         with self._lock:
             cached = tuple(self._manifests)
         preferred = tuple(dict.fromkeys((self.manifest.layout.layout_id, *cached)))
@@ -457,6 +479,9 @@ class KVCacheStore:
         completed = [0] * len(context.page_keys)
         for record in records:
             needed[record.page_index] += record.nbytes
+        read_ranges = self.backend.ranged_reader(
+            key_rows[r.page_index][r.object_index] for r in records
+        )
         for batch in _range_batches(records, self.transfer_limits):
             if cancelled is not None and cancelled():
                 return 0
@@ -474,9 +499,7 @@ class KVCacheStore:
                 [[r.object_offset for r in spans] for spans in row] for row in all_spans
             ]
             sizes = [[[r.nbytes for r in spans] for spans in row] for row in all_spans]
-            results = self.backend.store.get_into_ranges(
-                buffers, all_keys, dst, src, sizes
-            )
+            results = read_ranges(buffers, all_keys, dst, src, sizes)
             if len(results) != len(all_spans):
                 raise KVCacheStoreError("native read result shape differs")
             for row, response in zip(all_spans, results):

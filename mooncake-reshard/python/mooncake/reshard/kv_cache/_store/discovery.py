@@ -27,9 +27,13 @@ class KVCacheStoreProbePlan:
         limits: KVCacheStorePlanningLimits = DEFAULT_STORE_PLANNING_LIMITS,
     ) -> None:
         if not isinstance(catalog, KVCacheStoreLayoutCatalog):
-            raise ValueError("catalog must be a KVCacheStoreLayoutCatalog")  # noqa: TRY004
+            raise ValueError(
+                "catalog must be a KVCacheStoreLayoutCatalog"
+            )  # noqa: TRY004
         if not isinstance(limits, KVCacheStorePlanningLimits):
-            raise ValueError("limits must be KVCacheStorePlanningLimits")  # noqa: TRY004
+            raise ValueError(
+                "limits must be KVCacheStorePlanningLimits"
+            )  # noqa: TRY004
         pages = require_manifest_items(page_keys, "page_keys", str)
         for page in pages:
             require_nonempty_string(page, "page_key")
@@ -37,11 +41,10 @@ class KVCacheStoreProbePlan:
         if len(pages) * objects_per_page > limits.max_probe_keys:
             raise ValueError("probe key count limit exceeded")
         # Measure suffix bytes once with a one-byte placeholder, before N-page expansion.
-        suffix_bytes = sum(
-            len(key.encode("utf-8")) - 1
-            for entry in catalog.entries
-            for key in entry.object_keys("x")
+        suffixes = tuple(
+            key[1:] for entry in catalog.entries for key in entry.object_keys("x")
         )
+        suffix_bytes = sum(len(suffix.encode("utf-8")) for suffix in suffixes)
         byte_count = objects_per_page * sum(len(p.encode("utf-8")) for p in pages)
         byte_count += len(pages) * suffix_bytes
         if byte_count > limits.max_probe_bytes:
@@ -51,12 +54,7 @@ class KVCacheStoreProbePlan:
         object.__setattr__(
             self,
             "keys",
-            tuple(
-                key
-                for page in pages
-                for entry in catalog.entries
-                for key in entry.object_keys(page)
-            ),
+            tuple(page + suffix for page in pages for suffix in suffixes),
         )
 
 

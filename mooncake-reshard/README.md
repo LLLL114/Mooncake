@@ -189,3 +189,10 @@ python3 -m pytest -q mooncake-reshard/tests
 
 npx --yes pyright --project mooncake-reshard/pyrightconfig.json
 ```
+
+## KV Store read performance
+
+Store manifests cache immutable digests; discovery caches parsed catalogs only
+while their freshly read contents and CAS version agree. Object existence and
+replica leases are still checked per operation. Derived caches are excluded from
+canonical dataclass serialization, so page/object identities do not change.

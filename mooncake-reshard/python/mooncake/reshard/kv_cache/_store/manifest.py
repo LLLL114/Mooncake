@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
+from functools import cached_property
 
 from ..snapshot import _canonical_digest
 from ..types import (
@@ -85,7 +86,9 @@ class KVCacheStoreLayout:
         if not isinstance(self.descriptor, KVCacheDescriptor):
             raise ValueError("descriptor must be a KVCacheDescriptor")  # noqa: TRY004
         if not isinstance(self.object_format, KVCacheStoreFormat):
-            raise ValueError("object_format must be a KVCacheStoreFormat")  # noqa: TRY004
+            raise ValueError(
+                "object_format must be a KVCacheStoreFormat"
+            )  # noqa: TRY004
         shards = require_manifest_items(self.shards, "Store shards", KVCacheStoreShard)
         if len({shard.key_suffix for shard in shards}) != len(shards):
             raise ValueError("Store shard key suffixes must be unique")
@@ -176,7 +179,7 @@ class KVCacheStoreLayout:
                     )
         return tuple(result)
 
-    @property
+    @cached_property
     def digest(self) -> str:
         return _canonical_digest(asdict(self))
 
@@ -228,7 +231,7 @@ class KVCacheStoreManifest:
         if not isinstance(self.layout, KVCacheStoreLayout):
             raise ValueError("layout must be a KVCacheStoreLayout")  # noqa: TRY004
 
-    @property
+    @cached_property
     def model_domain(self) -> str:
         """Exclude TP/PP geometry so layouts share one discovery directory."""
         return _canonical_digest(
@@ -246,7 +249,7 @@ class KVCacheStoreManifest:
     def manifest_key(self) -> str:
         return _manifest_key(self.model_domain, self.layout.layout_id)
 
-    @property
+    @cached_property
     def digest(self) -> str:
         return _canonical_digest(asdict(self))
 

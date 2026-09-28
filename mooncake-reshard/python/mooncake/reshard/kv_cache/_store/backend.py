@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable, Iterable
 from importlib import import_module
 from typing import Any, cast
 
@@ -31,6 +32,37 @@ class StoreBackend:
                 raise KVCacheStoreError(
                     f"native Store lacks required capability: {name}"
                 )
+
+    def ranged_reader(
+        self, keys: Iterable[str]
+    ) -> Callable[..., list[list[list[int]]]]:
+        """Reuse one metadata snapshot within a load, prepared on its first read.
+
+        Whole-object fast paths and cancelled loads do not query metadata here.
+        The native Python binding refreshes leases before subsequent batches.
+        A new load gets a new reader; snapshots never outlive their source set.
+        """
+        prepare = getattr(self.store, "prepare_get_into_ranges_snapshot", None)
+        read = getattr(self.store, "get_into_ranges_from_snapshot", None)
+        if prepare is None and read is None:
+            return cast(
+                Callable[..., list[list[list[int]]]], self.store.get_into_ranges
+            )
+        if not callable(prepare) or not callable(read):
+            raise KVCacheStoreError(
+                "native Store must expose both ranged-read snapshot methods"
+            )
+        snapshot: object | None = None
+
+        def read_ranges(*args: Any) -> list[list[list[int]]]:
+            nonlocal snapshot
+            if snapshot is None:
+                snapshot = prepare(list(dict.fromkeys(keys)))
+                if snapshot is None:
+                    raise KVCacheStoreError("native Store returned an invalid snapshot")
+            return cast(list[list[list[int]]], read(snapshot, *args))
+
+        return read_ranges
 
     def metadata_config(self) -> Any:
         module = import_module("mooncake.store")
