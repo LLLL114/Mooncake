@@ -1,5 +1,39 @@
 """Framework-neutral KV-cache reshard contracts and planning API."""
 
+from ._store.backend import KVCacheStoreError
+from ._store.catalog import (
+    KVCacheStoreLayoutCatalog,
+    KVCacheStoreLayoutEntry,
+)
+from ._store.discovery import (
+    KVCacheStoreProbePlan,
+    plan_kv_cache_store_probe,
+    select_kv_cache_store_sources,
+)
+from ._store.manifest import (
+    KVCacheStoreFormat,
+    KVCacheStoreFragment,
+    KVCacheStoreLayout,
+    KVCacheStoreManifest,
+    KVCacheStoreShard,
+)
+from ._store.planner import (
+    KVCacheStoreLoadPlan,
+    KVCacheStoreLoadRange,
+    KVCacheStorePlanningLimits,
+    KVCacheStoreUploadPlan,
+    plan_kv_cache_store_load,
+    plan_kv_cache_store_upload,
+)
+from ._store.serde import (
+    kv_cache_store_catalog_from_json,
+    kv_cache_store_catalog_to_json,
+    kv_cache_store_layout_from_json,
+    kv_cache_store_layout_to_json,
+    kv_cache_store_manifest_from_json,
+    kv_cache_store_manifest_to_json,
+)
+from ._store.store import KVCacheStore, KVCacheStoreReadContext
 from .completion import KVCacheCompletion, KVCacheTargetReceipt, KVCacheWriterReceipt
 from .executor import KVCacheTransferEngineExecutor
 from .manifest import (
@@ -86,6 +120,21 @@ __all__ = [
     "KVCacheRuntimeBuffer",
     "KVCacheRuntimeTransferPlan",
     "KVCacheSnapshotDescriptor",
+    "KVCacheStore",
+    "KVCacheStoreError",
+    "KVCacheStoreFormat",
+    "KVCacheStoreFragment",
+    "KVCacheStoreLayout",
+    "KVCacheStoreLayoutCatalog",
+    "KVCacheStoreLayoutEntry",
+    "KVCacheStoreLoadPlan",
+    "KVCacheStoreLoadRange",
+    "KVCacheStoreManifest",
+    "KVCacheStorePlanningLimits",
+    "KVCacheStoreProbePlan",
+    "KVCacheStoreReadContext",
+    "KVCacheStoreShard",
+    "KVCacheStoreUploadPlan",
     "KVCacheTargetReceipt",
     "KVCacheTopology",
     "KVCacheTopologyParticipant",
@@ -110,14 +159,24 @@ __all__ = [
     "kv_cache_runtime_transfer_to_json",
     "kv_cache_snapshot_from_json",
     "kv_cache_snapshot_to_json",
+    "kv_cache_store_catalog_from_json",
+    "kv_cache_store_catalog_to_json",
+    "kv_cache_store_layout_from_json",
+    "kv_cache_store_layout_to_json",
+    "kv_cache_store_manifest_from_json",
+    "kv_cache_store_manifest_to_json",
     "kv_cache_target_receipt_from_json",
     "kv_cache_target_receipt_to_json",
     "kv_cache_writer_receipt_from_json",
     "kv_cache_writer_receipt_to_json",
     "placement_fragment_id",
+    "plan_kv_cache_store_load",
+    "plan_kv_cache_store_probe",
+    "plan_kv_cache_store_upload",
     "plan_kv_cache_transfer_to_local_target",
     "prepare_kv_cache_transfer",
     "resolve_contiguous_runtime_binding",
+    "select_kv_cache_store_sources",
     "validate_resolved_runtime_binding",
     "validate_runtime_binding",
     "validate_runtime_bindings",

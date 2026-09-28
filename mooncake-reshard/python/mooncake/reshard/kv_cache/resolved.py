@@ -122,8 +122,8 @@ class KVCacheResolvedRuntimeBinding:
     instance_id: str
     revision: str
     participant_id: str
-    snapshot_id: str
-    snapshot_digest: str
+    snapshot_id: str | None
+    snapshot_digest: str | None
     regions: tuple[KVCacheRegisteredRegion, ...]
     ranges: tuple[KVCacheResolvedRange, ...]
 
@@ -135,11 +135,14 @@ class KVCacheResolvedRuntimeBinding:
             "instance_id",
             "revision",
             "participant_id",
-            "snapshot_id",
         ):
             require_nonempty_string(getattr(self, name), name)
-        for name in ("placement_digest", "snapshot_digest"):
-            require_sha256(getattr(self, name), name)
+        require_sha256(self.placement_digest, "placement_digest")
+        if (self.snapshot_id is None) != (self.snapshot_digest is None):
+            raise ValueError("snapshot identity must be present or absent as a pair")
+        if self.snapshot_id is not None:
+            require_nonempty_string(self.snapshot_id, "snapshot_id")
+            require_sha256(self.snapshot_digest, "snapshot_digest")
         regions = require_manifest_items(
             self.regions, "registered regions", KVCacheRegisteredRegion
         )
@@ -242,23 +245,51 @@ def _validated_spans(
         raise TypeError("placement must be a KVCachePlacementManifest")
     if not isinstance(snapshot, KVCacheSnapshotDescriptor):
         raise TypeError("snapshot must be a KVCacheSnapshotDescriptor")
+    if binding.snapshot_id != snapshot.snapshot_id:
+        raise ValueError("resolved binding snapshot_id differs")
+    if binding.snapshot_digest != snapshot.digest:
+        raise ValueError("resolved binding snapshot_digest differs")
+    if snapshot.resource_id != placement.resource_id:
+        raise ValueError("snapshot resource_id differs from placement")
+    return _validated_range_spans(
+        placement,
+        binding,
+        operation_id,
+        snapshot.token_start,
+        snapshot.token_count,
+        limits,
+    )
+
+
+def _validated_range_spans(
+    placement: KVCachePlacementManifest,
+    binding: KVCacheResolvedRuntimeBinding,
+    operation_id: str,
+    token_start: int,
+    token_count: int,
+    limits: KVCacheTransferLimits,
+) -> list[tuple[int, int]]:
+    """Shared address/coverage validation; callers establish content identity."""
+    if not isinstance(binding, KVCacheResolvedRuntimeBinding):
+        raise TypeError("binding must be a KVCacheResolvedRuntimeBinding")
+    if not isinstance(placement, KVCachePlacementManifest):
+        raise TypeError("placement must be a KVCachePlacementManifest")
     if not isinstance(limits, KVCacheTransferLimits):
         raise TypeError("limits must be KVCacheTransferLimits")
     require_nonempty_string(operation_id, "operation_id")
+    require_integer(token_start, "token_start")
+    require_integer(token_count, "token_count", minimum=1)
+    token_end = require_integer(token_start + token_count, "token_end")
     expected = {
         "operation_id": operation_id,
         "resource_id": placement.resource_id,
         "placement_id": placement.placement_id,
         "placement_digest": placement.digest,
         "revision": placement.revision,
-        "snapshot_id": snapshot.snapshot_id,
-        "snapshot_digest": snapshot.digest,
     }
     for name, value in expected.items():
         if getattr(binding, name) != value:
             raise ValueError(f"resolved binding {name} differs")
-    if snapshot.resource_id != placement.resource_id:
-        raise ValueError("snapshot resource_id differs from placement")
     if len(binding.ranges) > limits.max_ranges:
         raise ValueError("resolved range count limit exceeded")
     part = placement.part(ParticipantId(binding.participant_id))
@@ -268,13 +299,8 @@ def _validated_spans(
     for item in binding.ranges:
         if item.global_layer_id not in part.layer_ids:
             raise ValueError("resolved range contains an unowned layer")
-        if (
-            not snapshot.token_start
-            <= item.token_start
-            < item.token_end
-            <= snapshot.token_end
-        ):
-            raise ValueError("resolved range is outside snapshot token interval")
+        if not token_start <= item.token_start < item.token_end <= token_end:
+            raise ValueError("resolved range is outside operation token interval")
         if (
             not part.head_start
             <= item.head_start
@@ -323,7 +349,7 @@ def _validated_spans(
     work = 0
     for items in groups.values():
         boundaries = sorted(
-            {snapshot.token_start, snapshot.token_end}
+            {token_start, token_end}
             | {t for r in items for t in (r.token_start, r.token_end)}
         )
         work += len(boundaries) * len(items)

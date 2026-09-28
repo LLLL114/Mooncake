@@ -48,6 +48,8 @@ def _dump(value: object) -> str:
 def kv_cache_resolved_binding_to_json(binding: KVCacheResolvedRuntimeBinding) -> str:
     if not isinstance(binding, KVCacheResolvedRuntimeBinding):
         raise TypeError("binding must be a KVCacheResolvedRuntimeBinding")
+    if binding.snapshot_id is None:
+        raise ValueError("R2R serialization requires snapshot identity")
     return _dump(
         {
             "schema": "kv-cache-resolved-binding",
@@ -83,6 +85,8 @@ def kv_cache_resolved_binding_from_json(value: str) -> KVCacheResolvedRuntimeBin
     result = KVCacheResolvedRuntimeBinding(
         **cast(Any, data), regions=regions, ranges=ranges
     )
+    if result.snapshot_id is None:
+        raise ValueError("R2R serialization requires snapshot identity")
     if result.digest != _string(payload["digest"], "digest"):
         raise ValueError("resolved binding digest differs")
     return result
