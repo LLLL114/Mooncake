@@ -3955,13 +3955,13 @@ std::vector<std::shared_ptr<BufferHandle>> RealClient::batch_get_buffer(
 }
 
 tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
-    void *buffer, size_t size) {
+    void *buffer, size_t size, bool remote_accessible) {
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
     auto result = client_->RegisterLocalMemory(buffer, size, kWildcardLocation,
-                                               false, true);
+                                               remote_accessible, true);
     if (!result) {
         return result;
     }
@@ -3993,6 +3993,15 @@ tl::expected<void, ErrorCode> RealClient::unregister_buffer_internal(
         registered_buffer_sizes_.erase(buffer);
     }
     return {};
+}
+
+int RealClient::register_buffer_for_remote_access(void *buffer, size_t size) {
+    const auto &runtime =
+        device::GetAcceleratorRegistry().RuntimeAccelerators();
+    if (runtime.FindDeviceForPointer(buffer))
+        return to_py_ret(tl::expected<void, ErrorCode>{
+            tl::unexpected(ErrorCode::INVALID_PARAMS)});
+    return to_py_ret(register_buffer_internal(buffer, size, true));
 }
 
 int RealClient::unregister_buffer(void *buffer) {
@@ -4374,7 +4383,8 @@ RealClient::get_into_ranges_internal(
     const std::vector<std::vector<std::vector<size_t>>> &all_src_offsets,
     const std::vector<std::vector<std::vector<size_t>>> &all_sizes,
     const std::vector<size_t> *buffer_capacities,
-    const QueryResultCache *query_result_cache, bool allow_query_refresh) {
+    const QueryResultCache *query_result_cache, bool allow_query_refresh,
+    bool allow_staging, const std::vector<std::array<size_t, 4>> *read_plan) {
     auto results = build_ranged_read_internal_error_results(
         buffers.size(), all_keys, all_dst_offsets, ErrorCode::INVALID_PARAMS);
     if (!client_) {
@@ -4390,6 +4400,35 @@ RealClient::get_into_ranges_internal(
         (buffer_capacities && buffer_capacities->size() != buffer_count)) {
         LOG(ERROR) << "get_into_ranges: top-level size mismatch";
         return results;
+    }
+
+    // A caller may supply an already compiled traversal of source ranges:
+    // {buffer, object, first fragment, past-last fragment}. This is execution
+    // order, not a transport sorting policy. Metadata remains per object.
+    struct PlannedTransfer {
+        size_t index = SIZE_MAX;
+    };
+    std::vector<std::vector<PlannedTransfer>> planned_transfers;
+    if (read_plan) {
+        planned_transfers.resize(buffer_count);
+        for (size_t i = 0; i < buffer_count; ++i)
+            planned_transfers[i].resize(all_keys[i].size());
+        std::vector<std::vector<size_t>> covered(buffer_count);
+        for (size_t i = 0; i < buffer_count; ++i)
+            covered[i].resize(all_keys[i].size());
+        for (const auto &step : *read_plan) {
+            auto [i, j, first, end] = step;
+            if (i >= buffer_count || j >= all_keys[i].size() ||
+                j >= all_sizes[i].size() || first >= end ||
+                first != covered[i][j] || end > all_sizes[i][j].size())
+                return results;
+            covered[i][j] = end;
+        }
+        for (size_t i = 0; i < buffer_count; ++i) {
+            if (all_keys[i].size() != all_sizes[i].size()) return results;
+            for (size_t j = 0; j < all_keys[i].size(); ++j)
+                if (covered[i][j] != all_sizes[i][j].size()) return results;
+        }
     }
 
     std::vector<size_t> capacities = buffer_capacities
@@ -4538,6 +4577,8 @@ RealClient::get_into_ranges_internal(
                 if (inserted)
                     lease_it->second.expires_at =
                         metadata.query_result.lease_timeout;
+                if (read_plan)
+                    planned_transfers[i][j] = {memory_transfers.size()};
                 memory_transfers.push_back(TransferEngine::ScatterTransferRange{
                     .opcode = TransferRequest::READ,
                     .remote_segment = handle.transport_endpoint_,
@@ -4618,7 +4659,30 @@ RealClient::get_into_ranges_internal(
 
     // Planning may consume most of a short lease; renew before submission.
     if (allow_query_refresh && !scatter_leases.empty()) refresh_leases();
-    auto operation = client_->SubmitScatter(memory_transfers);
+    std::vector<TransferEngine::ScatterTransferRange> ordered_transfers;
+    if (read_plan) {
+        ordered_transfers.reserve(read_plan->size());
+        for (const auto &step : *read_plan) {
+            auto [i, j, first, end] = step;
+            const auto mapping = planned_transfers[i][j];
+            if (mapping.index == SIZE_MAX) continue;
+            const auto &source = memory_transfers[mapping.index];
+            auto transfer = source;
+            transfer.local_offsets =
+                source.local_offsets.subspan(first, end - first);
+            transfer.remote_offsets =
+                source.remote_offsets.subspan(first, end - first);
+            transfer.lengths = source.lengths.subspan(first, end - first);
+            transfer.on_fragment_complete =
+                [callback = &source.on_fragment_complete, first](
+                    size_t k, const Status &status) {
+                    (*callback)(first + k, status);
+                };
+            ordered_transfers.push_back(std::move(transfer));
+        }
+    }
+    auto operation = client_->SubmitScatter(read_plan ? ordered_transfers
+                                                      : memory_transfers);
     if (!operation.has_value()) {
         const auto failure =
             Status::InvalidArgument("TransferSubmitter not initialized");
@@ -4653,6 +4717,20 @@ RealClient::get_into_ranges_from_snapshot(
     return convert_ranged_read_results(get_into_ranges_internal(
         buffers, all_keys, all_dst_offsets, all_src_offsets, all_sizes, nullptr,
         &query_result_cache, false));
+}
+
+std::vector<std::vector<std::vector<int64_t>>>
+RealClient::get_into_ranges_from_snapshot(
+    const std::vector<void *> &buffers,
+    const std::vector<std::vector<std::string>> &all_keys,
+    const std::vector<std::vector<std::vector<size_t>>> &all_dst_offsets,
+    const std::vector<std::vector<std::vector<size_t>>> &all_src_offsets,
+    const std::vector<std::vector<std::vector<size_t>>> &all_sizes,
+    const QueryResultCache &query_result_cache, bool allow_staging,
+    const std::vector<std::array<size_t, 4>> *read_plan) {
+    return convert_ranged_read_results(get_into_ranges_internal(
+        buffers, all_keys, all_dst_offsets, all_src_offsets, all_sizes, nullptr,
+        &query_result_cache, false, allow_staging, read_plan));
 }
 
 std::vector<std::vector<std::vector<int64_t>>> RealClient::get_into_ranges(

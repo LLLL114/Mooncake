@@ -512,11 +512,23 @@ class RangedReadSnapshotPy {
         const std::vector<std::vector<std::string>> &all_keys,
         const std::vector<std::vector<std::vector<size_t>>> &all_dst_offsets,
         const std::vector<std::vector<std::vector<size_t>>> &all_src_offsets,
-        const std::vector<std::vector<std::vector<size_t>>> &all_sizes) {
+        const std::vector<std::vector<std::vector<size_t>>> &all_sizes,
+        bool allow_staging = false,
+        const std::vector<std::array<size_t, 4>> *read_plan = nullptr) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (snapshot_.should_refresh()) {
             store_->refresh_get_into_ranges_snapshot(snapshot_, keys_);
         }
+        if (allow_staging || read_plan) {
+            if (auto *real = dynamic_cast<RealClient *>(store_.get())) {
+                return real->get_into_ranges_from_snapshot(
+                    buffers, all_keys, all_dst_offsets, all_src_offsets,
+                    all_sizes, snapshot_.query_result_cache, allow_staging,
+                    read_plan);
+            }
+        }
+        if (read_plan)
+            throw std::invalid_argument("Planned reads require RealClient");
         return store_->get_into_ranges_from_snapshot(
             buffers, all_keys, all_dst_offsets, all_src_offsets, all_sizes,
             snapshot_);
@@ -528,6 +540,8 @@ class RangedReadSnapshotPy {
     PyClient::RangedReadSnapshot snapshot_;
     std::mutex mutex_;
 };
+
+#include "store_py_range_template.h"
 
 // Python-specific wrapper functions that handle GIL and return pybind11 types
 class MooncakeStorePyWrapper {
@@ -2114,6 +2128,14 @@ PYBIND11_MODULE(store, m) {
     m.def("_deserialize_tensor", &deserialize_tensor_from_bytes,
           "Deserialize Mooncake tensor metadata plus payload bytes.");
 
+    py::class_<RangedReadPlanPy, std::shared_ptr<RangedReadPlanPy>>(
+        m, "RangedReadPlan");
+
+    py::class_<RangedReadTemplatePy, std::shared_ptr<RangedReadTemplatePy>>(
+        m, "RangedReadTemplate", "Immutable address-free ranged-read geometry")
+        .def_property_readonly(
+            "range_count",
+            [](const RangedReadTemplatePy &plan) { return plan.sizes.size(); });
     py::class_<RangedReadSnapshotPy, std::shared_ptr<RangedReadSnapshotPy>>(
         m, "RangedReadSnapshot",
         "Reusable metadata snapshot for repeated ranged reads");
@@ -2944,6 +2966,21 @@ PYBIND11_MODULE(store, m) {
             py::arg("buffer_ptr"), py::arg("size"),
             "Register a memory buffer for direct access operations")
         .def(
+            "register_buffer_for_remote_access",
+            [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr,
+               size_t size) {
+                if (!self.real_client_ || self.use_dummy_client_)
+                    throw std::runtime_error(
+                        "Remote registration requires RealClient");
+                py::gil_scoped_release release;
+                return self.real_client_->register_buffer_for_remote_access(
+                    reinterpret_cast<void *>(buffer_ptr), size);
+            },
+            py::arg("buffer_ptr"), py::arg("size"),
+            "Register a host buffer for remote reads/writes before starting "
+            "IO. "
+            "Use unregister_buffer to release it.")
+        .def(
             "unregister_buffer",
             [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr) {
                 // Unregister memory buffer
@@ -2990,6 +3027,84 @@ PYBIND11_MODULE(store, m) {
             py::arg("all_sizes"),
             "Get multiple byte ranges from multiple objects into multiple "
             "pre-allocated buffers")
+        .def(
+            "prepare_get_into_ranges_template",
+            [](MooncakeStorePyWrapper &, std::vector<size_t> destinations,
+               std::vector<size_t> sources, std::vector<size_t> sizes) {
+                py::gil_scoped_release release;
+                return std::make_shared<RangedReadTemplatePy>(
+                    std::move(destinations), std::move(sources),
+                    std::move(sizes));
+            },
+            py::arg("destinations"), py::arg("sources"), py::arg("sizes"),
+            "Compile immutable byte geometry without retaining keys or "
+            "addresses")
+        .def(
+            "prepare_get_into_ranges_plan",
+            [](MooncakeStorePyWrapper &,
+               const std::vector<std::shared_ptr<RangedReadTemplatePy>>
+                   &templates,
+               const std::vector<std::string> &suffixes,
+               const std::vector<size_t> &buffer_indices) {
+                py::gil_scoped_release release;
+                return std::make_shared<RangedReadPlanPy>(templates, suffixes,
+                                                          buffer_indices);
+            },
+            py::arg("templates"), py::arg("suffixes"),
+            py::arg("buffer_indices"))
+        .def(
+            "get_into_ranges_from_plan",
+            [](MooncakeStorePyWrapper &self,
+               const std::shared_ptr<RangedReadSnapshotPy> &snapshot,
+               const std::vector<std::shared_ptr<RangedReadPlanPy>> &plans,
+               const std::vector<uintptr_t> &buffer_ptrs,
+               const std::vector<std::string> &prefixes,
+               const std::vector<std::vector<size_t>> &translations,
+               bool allow_staging) {
+                if (!self.is_client_initialized() || !self.real_client_ ||
+                    self.use_dummy_client_)
+                    throw std::runtime_error(
+                        "Planned reads require initialized RealClient");
+                if (!snapshot || !snapshot->belongs_to(self.store_))
+                    throw std::invalid_argument(
+                        "Read snapshot belongs to a different Store");
+                py::gil_scoped_release release;
+                return read_range_plans(*snapshot, plans, buffer_ptrs, prefixes,
+                                        translations, allow_staging);
+            },
+            py::arg("snapshot"), py::arg("plans"), py::arg("buffer_ptrs"),
+            py::arg("prefixes"), py::arg("translations"),
+            py::arg("allow_staging") = false)
+        .def_property_readonly("supports_planned_range_reads",
+                               [](const MooncakeStorePyWrapper &self) {
+                                   return self.is_client_initialized() &&
+                                          !self.use_dummy_client_;
+                               })
+        .def(
+            "get_into_ranges_from_template",
+            [](MooncakeStorePyWrapper &self,
+               const std::shared_ptr<RangedReadSnapshotPy> &snapshot,
+               const std::vector<std::shared_ptr<RangedReadTemplatePy>>
+                   &templates,
+               const std::vector<uintptr_t> &buffer_ptrs,
+               const std::vector<size_t> &buffer_indices,
+               const std::vector<std::string> &keys,
+               const std::vector<size_t> &translations, bool allow_staging) {
+                if (!self.is_client_initialized())
+                    throw std::runtime_error("Client is not initialized");
+                if (!snapshot || !snapshot->belongs_to(self.store_))
+                    throw std::invalid_argument(
+                        "Ranged-read snapshot belongs to another Store");
+                py::gil_scoped_release release;
+                return read_range_templates(*snapshot, templates, buffer_ptrs,
+                                            buffer_indices, keys, translations,
+                                            allow_staging);
+            },
+            py::arg("snapshot"), py::arg("templates"), py::arg("buffer_ptrs"),
+            py::arg("buffer_indices"), py::arg("keys"), py::arg("translations"),
+            py::arg("allow_staging") = false,
+            "Read translated templates synchronously, returning exact "
+            "completion per object. Staging requires explicit opt-in.")
         .def(
             "prepare_get_into_ranges_snapshot",
             [](MooncakeStorePyWrapper &self,

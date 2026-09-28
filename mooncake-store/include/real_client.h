@@ -1,4 +1,6 @@
 #pragma once
+
+#include <array>
 #include <tuple>
 
 #include <atomic>
@@ -117,6 +119,9 @@ class RealClient : public PyClient {
 
     int register_buffer(void *buffer, size_t size);
 
+    // Explicit registration for owner-initiated RDMA writes into host memory.
+    int register_buffer_for_remote_access(void *buffer, size_t size);
+
     int unregister_buffer(void *buffer);
 
     struct WritableBufferRegion {
@@ -158,6 +163,17 @@ class RealClient : public PyClient {
         const std::vector<std::vector<std::vector<size_t>>> &all_src_offsets,
         const std::vector<std::vector<std::vector<size_t>>> &all_sizes,
         const QueryResultCache &query_result_cache) override;
+
+    // Explicit, per-call staging policy. Existing read APIs remain direct.
+    std::vector<std::vector<std::vector<int64_t>>>
+    get_into_ranges_from_snapshot(
+        const std::vector<void *> &buffers,
+        const std::vector<std::vector<std::string>> &all_keys,
+        const std::vector<std::vector<std::vector<size_t>>> &all_dst_offsets,
+        const std::vector<std::vector<std::vector<size_t>>> &all_src_offsets,
+        const std::vector<std::vector<std::vector<size_t>>> &all_sizes,
+        const QueryResultCache &query_result_cache, bool allow_staging,
+        const std::vector<std::array<size_t, 4>> *read_plan = nullptr);
 
     /**
      * @brief Batch query object placement/lease metadata for later read reuse
@@ -649,8 +665,8 @@ class RealClient : public PyClient {
         const std::shared_ptr<ClientBufferAllocator> &client_buffer_allocator =
             nullptr);
 
-    tl::expected<void, ErrorCode> register_buffer_internal(void *buffer,
-                                                           size_t size);
+    tl::expected<void, ErrorCode> register_buffer_internal(
+        void *buffer, size_t size, bool remote_accessible = false);
 
     struct RangedReadMetadata {
         QueryResult query_result;
@@ -687,7 +703,8 @@ class RealClient : public PyClient {
         const std::vector<std::vector<std::vector<size_t>>> &all_sizes,
         const std::vector<size_t> *buffer_capacities = nullptr,
         const QueryResultCache *query_result_cache = nullptr,
-        bool allow_query_refresh = true);
+        bool allow_query_refresh = true, bool allow_staging = false,
+        const std::vector<std::array<size_t, 4>> *read_plan = nullptr);
 
     std::vector<tl::expected<int64_t, ErrorCode>> batch_get_into_internal(
         const std::vector<std::string> &keys,

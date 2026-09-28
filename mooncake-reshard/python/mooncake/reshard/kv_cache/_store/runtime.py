@@ -31,6 +31,8 @@ def lower_store_ranges(
     fragments: tuple[tuple[KVCacheStoreFragment, ...], ...],
     operation_id: str,
     limits: KVCacheTransferLimits,
+    *,
+    target_ordered: bool = False,
 ) -> tuple[StoreByteRange, ...]:
     """Validate all runtime pages, then join each page's selected Store layout."""
     if binding.snapshot_id is not None or binding.snapshot_digest is not None:
@@ -105,12 +107,16 @@ def lower_store_ranges(
                             )
                         )
     records.sort(
-        key=lambda r: (
-            r.page_index,
-            r.object_index,
-            r.object_offset,
-            r.region_id,
-            r.region_offset,
+        key=(
+            (lambda r: (r.region_id, r.region_offset))
+            if target_ordered
+            else lambda r: (
+                r.page_index,
+                r.object_index,
+                r.object_offset,
+                r.region_id,
+                r.region_offset,
+            )
         )
     )
     merged: list[StoreByteRange] = []

@@ -10,6 +10,7 @@ import subprocess
 import time
 import traceback
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -173,7 +174,8 @@ def test_native_metadata_conditional_update(cluster):
 
 @pytest.mark.parametrize("fmt", tuple(KVCacheStoreFormat))
 @pytest.mark.parametrize("target_fmt", tuple(KVCacheStoreFormat))
-def test_native_single_process_tp_pp_restore(cluster, fmt, target_fmt):
+@pytest.mark.parametrize("prepared", [False, True])
+def test_native_single_process_tp_pp_restore(cluster, fmt, target_fmt, prepared):
     addresses, _, _ = cluster
     raw = _real(addresses)
     placement = _placement("source", ((0,), (1, 2), (3,)), 1)
@@ -205,8 +207,28 @@ def test_native_single_process_tp_pp_restore(cluster, fmt, target_fmt):
             with _bound(
                 raw, target, part.participant_id, target_fmt, 2, "read", fill=False
             ) as (binding, buffers, expected):
-                assert reader.load(context, target, binding) == 2
-                assert [bytes(buffer) for buffer in buffers] == expected
+                if prepared:
+                    one_page = replace(
+                        binding,
+                        regions=binding.regions[:2],
+                        ranges=tuple(r for r in binding.ranges if r.token_start == 0),
+                    )
+                    page_context = replace(
+                        context,
+                        page_keys=context.page_keys[:1],
+                        layout_ids=context.layout_ids[:1],
+                    )
+                    page_reader = reader.prepare_page_reader(target, one_page)
+                    assert (
+                        page_reader.load(
+                            page_context, [{r.region_id: 0 for r in one_page.regions}]
+                        )
+                        == 1
+                    )
+                    assert [bytes(buffer) for buffer in buffers[:2]] == expected[:2]
+                else:
+                    assert reader.load(context, target, binding) == 2
+                    assert [bytes(buffer) for buffer in buffers] == expected
     finally:
         raw.close()
 
@@ -238,6 +260,10 @@ def test_native_multi_batch_snapshot_restore(cluster, prepared):
         def get_into_ranges_from_snapshot(self, snapshot, *args):
             self.reads.append(snapshot)
             return raw.get_into_ranges_from_snapshot(snapshot, *args)
+
+        def get_into_ranges_from_template(self, snapshot, *args, **kwargs):
+            self.reads.append(snapshot)
+            return raw.get_into_ranges_from_template(snapshot, *args, **kwargs)
 
         def get_into_ranges(self, *args):
             raise AssertionError("unexpected ordinary ranged read")
@@ -471,3 +497,240 @@ def test_native_dummy_client_uses_its_own_local_allocator(cluster):
         if raw is not None:
             raw.close()
         _stop(proxy)
+
+
+
+
+@pytest.mark.parametrize("allow_staging", [None, False])
+def test_native_templates_validate_translate_and_reuse_geometry(cluster, allow_staging):
+    import ctypes
+    from concurrent.futures import ThreadPoolExecutor
+
+    addresses, _, _ = cluster
+    raw = _real(addresses)
+    other = _real(addresses)
+    assert getattr(raw, "supports_ranged_read_staging", False) is False
+    staging_options = {} if allow_staging is None else {"allow_staging": allow_staging}
+    key = uuid.uuid4().hex
+    payload = bytes(i % 251 for i in range(32768))
+    buffers = [(ctypes.c_ubyte * 32768)() for _ in range(2)]
+    pointers = [ctypes.addressof(b) for b in buffers]
+    try:
+        assert raw.put(key, payload) == 0
+        for pointer in pointers:
+            assert raw.register_buffer(pointer, 32768) == 0
+        source = [i * 256 for i in range(64)]
+        destination = [i * 128 for i in reversed(range(64))]
+        plan = raw.prepare_get_into_ranges_template(destination, source, [128] * 64)
+        assert plan.range_count == 64
+        snapshot = raw.prepare_get_into_ranges_snapshot([key, key + "-missing"])
+
+        # The same plan carries neither destination addresses nor request keys.
+        def read(index):
+            return raw.get_into_ranges_from_template(
+                snapshot,
+                [plan],
+                pointers,
+                [index],
+                [key],
+                [17 + index],
+                **staging_options,
+            )
+
+        with ThreadPoolExecutor(2) as pool:
+            assert list(pool.map(read, range(2))) == [[True], [True]]
+        for index, buffer in enumerate(buffers):
+            expected = bytearray(32768)
+            for d, s in zip(destination, source):
+                expected[d + 17 + index : d + 17 + index + 128] = payload[s : s + 128]
+            assert bytes(buffer) == expected
+        assert raw.get_into_ranges_from_template(
+            snapshot, [plan], pointers, [0], [key + "-missing"], [0]
+        ) == [False]
+        assert raw.get_into_ranges_from_template(
+            snapshot, [plan], pointers, [0], [key], [32700]
+        ) == [False]
+        with pytest.raises(ValueError, match="another Store"):
+            other.get_into_ranges_from_template(
+                snapshot, [plan], pointers, [0], [key], [0]
+            )
+        for plans, indices, keys, deltas in [
+            ([plan], [2], [key], [0]),
+            ([plan], [0], [key], [(1 << 64) - 1]),
+            ([], [0], [key], [0]),
+        ]:
+            with pytest.raises(ValueError):
+                raw.get_into_ranges_from_template(
+                    snapshot, plans, pointers, indices, keys, deltas
+                )
+        for dst, src, sizes in [
+            ([], [], []),
+            ([0], [], [1]),
+            ([0], [0], [0]),
+            ([(1 << 64) - 1], [0], [1]),
+        ]:
+            with pytest.raises(ValueError):
+                raw.prepare_get_into_ranges_template(dst, src, sizes)
+    finally:
+        for pointer in pointers:
+            raw.unregister_buffer(pointer)
+        raw.close()
+        other.close()
+
+
+@pytest.mark.parametrize("remote_access", [False, True])
+@pytest.mark.parametrize("allow_staging", [False])
+def test_cross_object_templates_preserve_holes_and_results(
+    cluster, remote_access, allow_staging
+):
+    """Interleaved sources fill final target runs without overwriting gaps."""
+    import ctypes
+
+    addresses, _, _ = cluster
+    raw = _real(addresses)
+    count, width, hole = 4096, 128, 256
+    useful = 2 * count * width
+    buffers = [(ctypes.c_ubyte * (useful + hole))() for _ in range(2)]
+    pointers = [ctypes.addressof(b) for b in buffers]
+    payloads = [bytes((i + salt) % 251 for i in range(count * 256)) for salt in (0, 79)]
+    keys = [uuid.uuid4().hex for _ in payloads]
+    register = (
+        raw.register_buffer_for_remote_access if remote_access else raw.register_buffer
+    )
+    try:
+        for pointer in pointers:
+            assert register(pointer, useful + hole) == 0
+        for key, payload in zip(keys, payloads):
+            assert raw.put(key, payload) == 0
+        snapshot = raw.prepare_get_into_ranges_snapshot(keys + [keys[0] + "-missing"])
+        plans, expected = [], bytearray([0xA5]) * (useful + hole)
+        for object_index, payload in enumerate(payloads):
+            destinations, sources = [], []
+            for i in reversed(range(count)):
+                destination = (2 * i + object_index) * width
+                if destination >= useful // 2:
+                    destination += hole
+                destinations.append(destination)
+                sources.append(i * 256)
+                expected[destination : destination + width] = payload[
+                    i * 256 : i * 256 + width
+                ]
+            plans.append(
+                raw.prepare_get_into_ranges_template(
+                    destinations, sources, [width] * count
+                )
+            )
+        # Deliberately reverse both object order and region order. Run twice to
+        # exercise reuse of the snapshot, template and peer metadata cache.
+        for _ in range(2):
+            for pointer in pointers:
+                ctypes.memset(pointer, 0xA5, useful + hole)
+            result = raw.get_into_ranges_from_template(
+                snapshot,
+                [plans[1], plans[0], plans[1], plans[0]],
+                pointers,
+                [1, 1, 0, 0],
+                [keys[1], keys[0], keys[1], keys[0]],
+                [0, 0, 0, 0],
+                allow_staging=allow_staging,
+            )
+            assert result == [True] * 4
+            assert [bytes(b) for b in buffers] == [expected, expected]
+        invalid = raw.prepare_get_into_ranges_template([0], [len(payloads[0])], [width])
+        ctypes.memset(pointers[0], 0xA5, useful + hole)
+        assert raw.get_into_ranges_from_template(
+            snapshot, [invalid], pointers, [0], [keys[0]], [0]
+        ) == [False]
+        assert bytes(buffers[0]) == bytes([0xA5]) * (useful + hole)
+        assert raw.get_into_ranges_from_template(
+            snapshot,
+            [plans[0]],
+            pointers,
+            [0],
+            [keys[0] + "-missing"],
+            [0],
+            allow_staging=allow_staging,
+        ) == [False]
+    finally:
+        for pointer in pointers:
+            raw.unregister_buffer(pointer)
+        raw.close()
+
+
+@pytest.mark.parametrize("allow_staging", [False])
+def test_native_destination_plan_reuses_sources_and_binds_pages(cluster, allow_staging):
+    """Cross-object runs preserve page identity, holes and grouped staging."""
+    import ctypes
+
+    addresses, _, _ = cluster
+    raw = _real(addresses)
+    width, count = 128, 64
+    page_bytes = 2 * width * count
+    buffer = (ctypes.c_ubyte * (4 * page_bytes))()
+    pointer = ctypes.addressof(buffer)
+    prefixes = [uuid.uuid4().hex for _ in range(2)]
+    keys = [prefix + suffix for prefix in prefixes for suffix in ("-a", "-b")]
+    expected = bytearray([0xA5]) * len(buffer)
+    try:
+        assert raw.supports_planned_range_reads
+        assert raw.register_buffer(pointer, len(buffer)) == 0
+        templates, suffixes = [], []
+        for i in range(count):
+            for object_index, suffix in enumerate(("-a", "-b")):
+                templates.append(
+                    raw.prepare_get_into_ranges_template(
+                        [(2 * i + object_index) * width], [i * 2 * width], [width]
+                    )
+                )
+                suffixes.append(suffix)
+        plan = raw.prepare_get_into_ranges_plan(
+            templates, suffixes, [0] * len(templates)
+        )
+        for page, prefix in enumerate(prefixes):
+            for object_index, suffix in enumerate(("-a", "-b")):
+                data = bytes(
+                    (i + page * 31 + object_index * 77) % 251
+                    for i in range(count * 2 * width)
+                )
+                assert raw.put(prefix + suffix, data) == 0
+                for i in range(count):
+                    offset = page * 2 * page_bytes + (2 * i + object_index) * width
+                    expected[offset : offset + width] = data[
+                        i * 2 * width : (i * 2 + 1) * width
+                    ]
+        snapshot = raw.prepare_get_into_ranges_snapshot(
+            keys + [prefixes[1] + "-missing"]
+        )
+        ctypes.memset(pointer, 0xA5, len(buffer))
+        for _ in range(2):
+            assert raw.get_into_ranges_from_plan(
+                snapshot,
+                [plan, plan],
+                [pointer],
+                list(reversed(prefixes)),
+                [[2 * page_bytes], [0]],
+                allow_staging=allow_staging,
+            ) == [True, True]
+            assert bytes(buffer) == expected
+        missing = raw.prepare_get_into_ranges_plan([templates[0]], ["-missing"], [0])
+        assert raw.get_into_ranges_from_plan(
+            snapshot,
+            [missing, plan],
+            [pointer],
+            list(reversed(prefixes)),
+            [[2 * page_bytes], [0]],
+            allow_staging=allow_staging,
+        ) == [False, True]
+        with pytest.raises(ValueError, match="translation"):
+            raw.get_into_ranges_from_plan(
+                snapshot, [plan], [pointer], [prefixes[0]], [[(1 << 64) - 1]]
+            )
+        assert bytes(buffer) == expected
+        with pytest.raises(ValueError, match="shape"):
+            raw.prepare_get_into_ranges_plan([templates[0]], [], [0])
+        scattered = raw.prepare_get_into_ranges_template([0, 32], [0, 16], [16, 16])
+        with pytest.raises(ValueError, match="contiguous"):
+            raw.prepare_get_into_ranges_plan([scattered], ["-a"], [0])
+    finally:
+        raw.unregister_buffer(pointer)
+        raw.close()

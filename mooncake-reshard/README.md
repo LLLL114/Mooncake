@@ -227,3 +227,54 @@ retains the previous PLHD identity, so existing PLHD manifests and page keys sta
 valid. Older LPHD/HPLD caches used separate format-specific domains and must be
 rewarmed after upgrading; old serialized LPHD/HPLD manifests are rejected by
 their domain checks. No existing object is renamed or silently reinterpreted.
+
+### Reusing native ranged-read geometry
+
+Prepared KV page readers use the optional native ranged-read template API when
+available. `prepare_get_into_ranges_template(destinations, sources, sizes)`
+retains only validated relative byte offsets and positive lengths. Each call to
+`get_into_ranges_from_template(snapshot, templates, buffer_ptrs, buffer_indices,
+keys, translations)` supplies fresh keys and registered
+destination regions.
+It returns one exact-completion boolean per template instance. Expansion and
+per-range result checking run in C++ with the GIL released; the Python hot path
+passes object-level bindings instead of boxing every range.
+
+Templates retain no runtime address, lease or replica and are safe to reuse
+concurrently. Metadata snapshots remain local to one load and refresh at the
+lease midpoint between batches. Runtime registration, source/destination bounds,
+operation/byte limits and cancellation between drained batches still apply.
+Whole-object fast paths are unchanged; older native bindings automatically use
+the original ranged-read interface.
+
+### Opt-in destination-ordered reads
+
+`prepare_page_reader(placement, binding, target_ordered=True)` compiles reads
+into contiguous destination runs, retaining the source object and byte offsets
+for each run. On each load, the reader builds bounded batches from actual
+host-page locations and orders their destination runs. Source bounds
+and completion in caller page order are preserved, even for noncontiguous or
+reordered host pages. This policy lives in KV reshard: no Transfer Engine
+sorting or additional native ordering API is required. Both native templates
+and the older ranged-read interface can execute the plan.
+
+When `supports_planned_range_reads` is available, the reader caches a native
+program with `prepare_get_into_ranges_plan`: destination runs reference a
+shared source-object geometry table. A load supplies only page-key prefixes
+and region translations through `get_into_ranges_from_plan`. The binding
+merges the bound runs by destination; RealClient reuses metadata
+per source object, then executes the supplied traversal. The program caches
+layout suffixes, never full runtime keys, addresses, replicas or leases.
+
+The default is false. The default mode preserves source-object grouping and
+whole-object fast paths. Destination mode uses ranged reads so downstream
+whole-object batching cannot reorder the plan. Older bindings, or pages larger than a native batch, use individual ordered
+run templates for correctness; this fallback can have higher binding overhead. The performance results require the matching
+native plan binding.
+
+This option does not implement owner gather. A gather-capable Transfer Engine
+can use contiguous destination runs, while an engine without gather executes
+ordered direct reads. For owner gather, register the final host buffers with
+`register_buffer_for_remote_access(pointer, size)` at initial registration,
+before any IO. Use `unregister_buffer` for release; do not unregister and
+re-register a live framework pool to change its access flags.

@@ -34,8 +34,8 @@ class StoreBackend:
                 )
 
     def ranged_reader(
-        self, keys: Iterable[str]
-    ) -> Callable[..., list[list[list[int]]]]:
+        self, keys: Iterable[str], *, templates: bool = False, plans: bool = False
+    ) -> Callable[..., Any]:
         """Reuse one metadata snapshot within a load, prepared on its first read.
 
         Whole-object fast paths and cancelled loads do not query metadata here.
@@ -43,8 +43,18 @@ class StoreBackend:
         A new load gets a new reader; snapshots never outlive their source set.
         """
         prepare = getattr(self.store, "prepare_get_into_ranges_snapshot", None)
-        read = getattr(self.store, "get_into_ranges_from_snapshot", None)
-        if prepare is None and read is None:
+        read = getattr(
+            self.store,
+            (
+                "get_into_ranges_from_plan"
+                if plans
+                else "get_into_ranges_from_template"
+                if templates
+                else "get_into_ranges_from_snapshot"
+            ),
+            None,
+        )
+        if prepare is None and read is None and not templates and not plans:
             return cast(
                 Callable[..., list[list[list[int]]]], self.store.get_into_ranges
             )
@@ -54,13 +64,13 @@ class StoreBackend:
             )
         snapshot: object | None = None
 
-        def read_ranges(*args: Any) -> list[list[list[int]]]:
+        def read_ranges(*args: Any, **kwargs: Any) -> Any:
             nonlocal snapshot
             if snapshot is None:
                 snapshot = prepare(list(dict.fromkeys(keys)))
                 if snapshot is None:
                     raise KVCacheStoreError("native Store returned an invalid snapshot")
-            return cast(list[list[list[int]]], read(snapshot, *args))
+            return read(snapshot, *args, **kwargs)
 
         return read_ranges
 

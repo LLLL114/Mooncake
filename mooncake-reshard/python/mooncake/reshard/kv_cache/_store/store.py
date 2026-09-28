@@ -207,16 +207,26 @@ class KVCacheStore:
         self,
         target_placement: KVCachePlacementManifest,
         page_binding: KVCacheResolvedRuntimeBinding,
+        *,
+        target_ordered: bool = False,
     ) -> KVCacheStorePageReader:
         """Prepare repeated-page reads for one fixed registered runtime pool.
 
         The binding covers one complete logical page. The returned reader
         caches source-to-target byte templates and accepts fresh per-region
         page offsets on each load. Recreate it when the pool changes.
+
+        target_ordered plans contiguous destination runs before batching. Receiver
+        staging remains an independent policy. A gather-capable engine can pack
+        contiguous target runs on the owner; that path requires destination
+        host buffers registered with register_buffer_for_remote_access before
+        starting IO. Engines without gather retain destination-ordered reads.
         """
         from .page_reader import KVCacheStorePageReader
 
-        return KVCacheStorePageReader(self, target_placement, page_binding)
+        return KVCacheStorePageReader(
+            self, target_placement, page_binding, target_ordered=target_ordered
+        )
 
     def upload(
         self,
