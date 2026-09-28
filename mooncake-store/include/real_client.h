@@ -1,4 +1,5 @@
 #pragma once
+#include <tuple>
 
 #include <atomic>
 #include <boost/lockfree/queue.hpp>
@@ -299,6 +300,25 @@ class RealClient : public PyClient {
                   const std::vector<std::span<const char>> &values,
                   const ReplicateConfig &config = ReplicateConfig{});
 
+    std::tuple<int, std::string, std::string> read_metadata_for_update(
+        const std::string &key) override;
+    int compare_exchange_metadata(const std::string &key,
+                                  const std::string &expected_token,
+                                  const std::string &value) override;
+
+    std::tuple<int, std::string, std::string> read_metadata_for_update_dummy(
+        const std::string &key, const UUID &client_id);
+    int compare_exchange_metadata_dummy(const std::string &key,
+                                        const std::string &token,
+                                        const std::string &value,
+                                        const UUID &client_id);
+    std::tuple<int, std::string, std::string> read_metadata_for_update_impl(
+        const std::string &key,
+        const std::shared_ptr<ClientBufferAllocator> &allocator);
+    int compare_exchange_metadata_impl(
+        const std::string &key, const std::string &token,
+        const std::string &value,
+        const std::shared_ptr<ClientBufferAllocator> &allocator);
     int upsert(const std::string &key, std::span<const char> value,
                const ReplicateConfig &config = ReplicateConfig{});
 

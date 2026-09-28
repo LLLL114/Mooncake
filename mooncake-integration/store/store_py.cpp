@@ -2376,6 +2376,34 @@ PYBIND11_MODULE(store, m) {
     py::class_<MooncakeStorePyWrapper>(m, "MooncakeDistributedStore")
         .def(py::init<>())
         .def(
+            "read_metadata_for_update",
+            [](MooncakeStorePyWrapper &self, const std::string &key) {
+                std::tuple<int, std::string, std::string> result;
+                if (!self.is_client_initialized())
+                    throw std::runtime_error("Store is not initialized");
+                {
+                    py::gil_scoped_release release;
+                    result = self.store_->read_metadata_for_update(key);
+                }
+                return py::make_tuple(std::get<0>(result),
+                                      py::bytes(std::get<1>(result)),
+                                      std::get<2>(result));
+            },
+            py::arg("key"))
+        .def(
+            "compare_exchange_metadata",
+            [](MooncakeStorePyWrapper &self, const std::string &key,
+               const std::string &expected_token, py::bytes value) {
+                if (!self.is_client_initialized())
+                    throw std::runtime_error("Store is not initialized");
+                std::string bytes = value;
+                py::gil_scoped_release release;
+                return self.store_->compare_exchange_metadata(
+                    key, expected_token, bytes);
+            },
+            py::arg("key"), py::arg("expected_token"), py::arg("value"))
+
+        .def(
             "begin_weight_snapshot",
             [](MooncakeStorePyWrapper &self, py::object snapshot,
                py::object adapter) -> py::object {

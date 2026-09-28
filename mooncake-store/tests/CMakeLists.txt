@@ -74,6 +74,7 @@ endif()
 add_subdirectory(master_service)
 
 add_store_test(master_service_test master_service_test.cpp)
+add_store_test(metadata_compare_exchange_test metadata_compare_exchange_test.cpp)
 add_store_test(master_service_group_test master_service_group_test.cpp)
 add_ha_test(master_service_evict_scenario_test
             master_service_evict_scenario_test.cpp)

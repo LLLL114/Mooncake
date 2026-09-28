@@ -23,6 +23,16 @@ template <auto Method>
 struct RpcNameTraits;
 
 template <>
+struct RpcNameTraits<&WrappedMasterService::GetMetadataForUpdate> {
+    static constexpr const char* value = "GetMetadataForUpdate";
+};
+
+template <>
+struct RpcNameTraits<&WrappedMasterService::CompareExchangeMetadata> {
+    static constexpr const char* value = "CompareExchangeMetadata";
+};
+
+template <>
 struct RpcNameTraits<&WrappedMasterService::ExistKey> {
     static constexpr const char* value = "ExistKey";
 };
@@ -514,6 +524,19 @@ ErrorCode MasterClient::Connect(const std::string& master_addr) {
     client_addr_param_ = master_addr;
     timer.LogResponse("error_code=", ErrorCode::OK);
     return ErrorCode::OK;
+}
+
+tl::expected<MetadataQueryResponse, ErrorCode>
+MasterClient::GetMetadataForUpdate(const std::string& key) {
+    return invoke_rpc<&WrappedMasterService::GetMetadataForUpdate,
+                      MetadataQueryResponse>(key, tenant_id_.value());
+}
+
+tl::expected<bool, ErrorCode> MasterClient::CompareExchangeMetadata(
+    const UUID& client_id, const std::string& key,
+    const std::string& expected_token, const std::string& staged_key) {
+    return invoke_rpc<&WrappedMasterService::CompareExchangeMetadata, bool>(
+        client_id, key, expected_token, staged_key, tenant_id_.value());
 }
 
 tl::expected<bool, ErrorCode> MasterClient::ExistKey(

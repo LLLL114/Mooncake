@@ -69,6 +69,11 @@ class QueryResult {
 /**
  * @brief Client for interacting with the mooncake distributed object store
  */
+struct MetadataQueryResult {
+    QueryResult query;
+    std::string token;
+};
+
 class Client {
    public:
     virtual ~Client();
@@ -138,6 +143,12 @@ class Client {
      * @return QueryResult containing replicas and lease timeout, or ErrorCode
      * indicating failure
      */
+    tl::expected<MetadataQueryResult, ErrorCode> QueryMetadata(
+        const std::string& key);
+    tl::expected<bool, ErrorCode> CompareExchangeMetadata(
+        const std::string& key, const std::string& expected_token,
+        const std::string& staged_key);
+
     tl::expected<QueryResult, ErrorCode> Query(const std::string& object_key);
 
     /**

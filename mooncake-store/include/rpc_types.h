@@ -90,6 +90,12 @@ struct GetReplicaListResponse {
 };
 YLT_REFL(GetReplicaListResponse, replicas, lease_ttl_ms, object_checksum);
 
+struct MetadataQueryResponse {
+    GetReplicaListResponse object;
+    std::string token;
+};
+YLT_REFL(MetadataQueryResponse, object, token);
+
 struct CachedQueryResultResponse {
     bool success;
     GetReplicaListResponse value;

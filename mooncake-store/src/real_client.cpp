@@ -4876,6 +4876,88 @@ int RealClient::put_from(const std::string &key, void *buffer, size_t size,
     return to_py_ret(result);
 }
 
+std::tuple<int, std::string, std::string> RealClient::read_metadata_for_update(
+    const std::string &key) {
+    return read_metadata_for_update_impl(key, client_buffer_allocator_);
+}
+std::tuple<int, std::string, std::string>
+RealClient::read_metadata_for_update_dummy(const std::string &key,
+                                           const UUID &client_id) {
+    std::shared_lock lock(dummy_client_mutex_);
+    auto it = shm_contexts_.find(client_id);
+    if (it == shm_contexts_.end())
+        return {toInt(ErrorCode::INVALID_PARAMS), {}, {}};
+    return read_metadata_for_update_impl(key,
+                                         it->second.client_buffer_allocator);
+}
+int RealClient::compare_exchange_metadata(const std::string &key,
+                                          const std::string &token,
+                                          const std::string &value) {
+    return compare_exchange_metadata_impl(key, token, value,
+                                          client_buffer_allocator_);
+}
+int RealClient::compare_exchange_metadata_dummy(const std::string &key,
+                                                const std::string &token,
+                                                const std::string &value,
+                                                const UUID &client_id) {
+    std::shared_lock lock(dummy_client_mutex_);
+    auto it = shm_contexts_.find(client_id);
+    if (it == shm_contexts_.end()) return toInt(ErrorCode::INVALID_PARAMS);
+    return compare_exchange_metadata_impl(key, token, value,
+                                          it->second.client_buffer_allocator);
+}
+
+std::tuple<int, std::string, std::string>
+RealClient::read_metadata_for_update_impl(
+    const std::string &key,
+    const std::shared_ptr<ClientBufferAllocator> &allocator) {
+    if (!client_ || !allocator)
+        return {toInt(ErrorCode::INVALID_PARAMS), {}, {}};
+    auto query = client_->QueryMetadata(key);
+    if (!query)
+        return {query.error() == ErrorCode::OBJECT_NOT_FOUND
+                    ? 0
+                    : toInt(query.error()),
+                {},
+                {}};
+    if (query->query.replicas.empty())
+        return {toInt(ErrorCode::INVALID_REPLICA), {}, {}};
+    const auto size = calculate_total_size(query->query.replicas.front());
+    if (size == 0 || size > (16ULL << 20))
+        return {toInt(ErrorCode::INVALID_PARAMS), {}, {}};
+    auto allocation = allocator->allocate(size);
+    if (!allocation) return {toInt(ErrorCode::INVALID_PARAMS), {}, {}};
+    auto slices = split_into_slices(*allocation);
+    // Offset overload intentionally bypasses the mutable-key local hot cache.
+    auto read = client_->Get(key, query->query, slices, 0);
+    if (!read) return {toInt(read.error()), {}, {}};
+    return {1, std::string(static_cast<const char *>(allocation->ptr()), size),
+            query->token};
+}
+
+int RealClient::compare_exchange_metadata_impl(
+    const std::string &key, const std::string &expected_token,
+    const std::string &value,
+    const std::shared_ptr<ClientBufferAllocator> &allocator) {
+    if (!client_ || !allocator || key.empty() || value.empty() ||
+        value.size() > (16ULL << 20))
+        return toInt(ErrorCode::INVALID_PARAMS);
+    const auto staged_key = key + "/.cas/" + UuidToString(generate_uuid());
+    ReplicateConfig config;
+    config.data_type = ObjectDataType::METADATA;
+    // Staging values are ordinary evictable objects if a writer crashes.
+    auto written = put_parts_internal(
+        staged_key, {std::span<const char>(value.data(), value.size())}, config,
+        allocator);
+    if (!written) return toInt(written.error());
+    auto result =
+        client_->CompareExchangeMetadata(key, expected_token, staged_key);
+    // The successful commit moved ownership; removing the old staging key
+    // cannot touch the catalog. Failed attempts only clean their own value.
+    (void)client_->Remove(staged_key, true);
+    return result ? (*result ? 1 : 0) : toInt(result.error());
+}
+
 // --- Upsert implementations ---
 
 tl::expected<void, ErrorCode> RealClient::upsert_internal(

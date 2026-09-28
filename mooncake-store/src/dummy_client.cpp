@@ -1264,6 +1264,24 @@ int DummyClient::upsert_batch(const std::vector<std::string>& keys,
         true, keys, values, config, client_id_);
 }
 
+std::tuple<int, std::string, std::string> DummyClient::read_metadata_for_update(
+    const std::string& key) {
+    auto result =
+        invoke_rpc<&RealClient::read_metadata_for_update_dummy,
+                   std::tuple<int, std::string, std::string>>(key, client_id_);
+    return result ? std::move(*result)
+                  : std::make_tuple(toInt(result.error()), std::string{},
+                                    std::string{});
+}
+
+int DummyClient::compare_exchange_metadata(const std::string& key,
+                                           const std::string& expected_token,
+                                           const std::string& value) {
+    auto result = invoke_rpc<&RealClient::compare_exchange_metadata_dummy, int>(
+        key, expected_token, value, client_id_);
+    return result ? *result : toInt(result.error());
+}
+
 int DummyClient::remove(const std::string& key, bool force) {
     return to_py_ret(
         invoke_rpc<&RealClient::remove_internal, void>(key, force));

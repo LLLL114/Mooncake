@@ -43,6 +43,14 @@ void RegisterClientRpcService(coro_rpc::coro_rpc_server &server,
     server.register_handler<&RealClient::removeByRegex_internal>(&real_client);
     server.register_handler<&RealClient::removeAll_internal>(&real_client);
     server.register_handler<&RealClient::batchRemove_internal>(&real_client);
+    server.register_handler<&RealClient::read_metadata_for_update_dummy>(
+        &real_client);
+    server.register_handler<&RealClient::compare_exchange_metadata_dummy>(
+        &real_client);
+    server.register_handler<&RealClient::read_metadata_for_update>(
+        &real_client);
+    server.register_handler<&RealClient::compare_exchange_metadata>(
+        &real_client);
     server.register_handler<&RealClient::isExist_internal>(&real_client);
     server.register_handler<&RealClient::batchIsExist_internal>(&real_client);
     server.register_handler<&RealClient::getSize_internal>(&real_client);

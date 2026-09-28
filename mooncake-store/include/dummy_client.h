@@ -1,4 +1,5 @@
 #pragma once
+#include <tuple>
 
 #include "common/result.h"
 
@@ -140,6 +141,12 @@ class DummyClient : public PyClient {
     int put_batch(const std::vector<std::string> &keys,
                   const std::vector<std::span<const char>> &values,
                   const ReplicateConfig &config = ReplicateConfig{});
+
+    std::tuple<int, std::string, std::string> read_metadata_for_update(
+        const std::string &key) override;
+    int compare_exchange_metadata(const std::string &key,
+                                  const std::string &expected_token,
+                                  const std::string &value) override;
 
     int upsert(const std::string &key, std::span<const char> value,
                const ReplicateConfig &config = ReplicateConfig{});

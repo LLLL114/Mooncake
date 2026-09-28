@@ -1180,6 +1180,26 @@ Client::QueryByRegex(const std::string& str) {
     return result;
 }
 
+tl::expected<MetadataQueryResult, ErrorCode> Client::QueryMetadata(
+    const std::string& key) {
+    const auto start = std::chrono::steady_clock::now();
+    auto response = master_client_.GetMetadataForUpdate(key);
+    if (!response) return tl::unexpected(response.error());
+    return MetadataQueryResult{
+        QueryResult(
+            std::move(response->object.replicas),
+            start + std::chrono::milliseconds(response->object.lease_ttl_ms),
+            response->object.object_checksum),
+        std::move(response->token)};
+}
+
+tl::expected<bool, ErrorCode> Client::CompareExchangeMetadata(
+    const std::string& key, const std::string& expected_token,
+    const std::string& staged_key) {
+    return master_client_.CompareExchangeMetadata(client_id_, key,
+                                                  expected_token, staged_key);
+}
+
 tl::expected<QueryResult, ErrorCode> Client::Query(
     const std::string& object_key) {
     std::chrono::steady_clock::time_point start_time =

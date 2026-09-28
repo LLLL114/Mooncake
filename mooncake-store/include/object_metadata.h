@@ -104,7 +104,8 @@ struct ObjectMetadata {
     const ObjectDataType data_type{ObjectDataType::UNKNOWN};
     const std::string group_id;
     const TenantId tenant_id;
-    const std::string user_key;
+    std::string user_key;  // Renamed only by atomic metadata replacement.
+    UUID metadata_incarnation{generate_uuid()};
 
     mutable SpinLock lock;
     // Authoritative lease: ungrouped objects own one; grouped objects share
@@ -118,7 +119,8 @@ struct ObjectMetadata {
     // carry a generation token, so a stale End from the same client cannot
     // otherwise be distinguished from the current write.
     std::optional<PendingSoftPinAction> pending_soft_pin_action;
-    const bool hard_pinned{false};  // immutable, set at creation
+    // Metadata CAS promotes a completed staging object.
+    bool hard_pinned{false};
     bool memory_cache_total_accounted{false};
     bool disk_cache_total_accounted{false};
     TenantQuotaLedger quota_ledger;

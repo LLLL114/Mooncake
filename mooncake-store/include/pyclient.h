@@ -1,4 +1,5 @@
 #pragma once
+#include <tuple>
 
 #include <algorithm>
 #include <atomic>
@@ -474,6 +475,12 @@ class PyClient {
         const std::vector<std::string> &keys,
         const std::vector<std::span<const char>> &values,
         const ReplicateConfig &config = ReplicateConfig{}) = 0;
+
+    virtual std::tuple<int, std::string, std::string> read_metadata_for_update(
+        const std::string &key) = 0;
+    virtual int compare_exchange_metadata(const std::string &key,
+                                          const std::string &expected_token,
+                                          const std::string &value) = 0;
 
     virtual int upsert(const std::string &key, std::span<const char> value,
                        const ReplicateConfig &config = ReplicateConfig{}) = 0;

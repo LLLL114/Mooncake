@@ -179,6 +179,12 @@ class MasterClient {
      * @param object_info Output parameter for object metadata
      * @return ErrorCode indicating success/failure
      */
+    tl::expected<MetadataQueryResponse, ErrorCode> GetMetadataForUpdate(
+        const std::string& key);
+    tl::expected<bool, ErrorCode> CompareExchangeMetadata(
+        const UUID& client_id, const std::string& key,
+        const std::string& expected_token, const std::string& staged_key);
+
     [[nodiscard]] tl::expected<GetReplicaListResponse, ErrorCode>
     GetReplicaList(const std::string& object_key);
     [[nodiscard]] tl::expected<GetReplicaListResponse, ErrorCode>

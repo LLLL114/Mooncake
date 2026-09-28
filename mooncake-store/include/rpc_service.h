@@ -37,6 +37,13 @@ class WrappedMasterService {
 
     ~WrappedMasterService();
 
+    tl::expected<MetadataQueryResponse, ErrorCode> GetMetadataForUpdate(
+        const std::string& key, const std::string& tenant_id = "default");
+    tl::expected<bool, ErrorCode> CompareExchangeMetadata(
+        const UUID& client_id, const std::string& key,
+        const std::string& expected_token, const std::string& staged_key,
+        const std::string& tenant_id = "default");
+
     tl::expected<bool, ErrorCode> ExistKey(
         const std::string& key, const std::string& tenant_id = "default");
 

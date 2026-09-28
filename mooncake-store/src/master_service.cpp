@@ -4235,6 +4235,131 @@ auto MasterService::GetReplicaListByRegex(const std::string& regex_pattern,
     return results;
 }
 
+tl::expected<MetadataQueryResponse, ErrorCode>
+MasterService::GetMetadataForUpdate(const std::string& key,
+                                    const TenantId& tenant_id) {
+    // Atomic relocation is not yet represented by the HA operation log.
+    if (enable_oplog_ || enable_ha_)
+        return tl::unexpected(ErrorCode::NOT_SUPPORTED);
+    if (key.empty()) return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    std::shared_lock snapshot_lock(snapshot_mutex_);
+    MetadataAccessorRO accessor(this,
+                                MakeObjectIdentityForRequest(key, tenant_id));
+    if (!accessor.Exists()) return tl::unexpected(ErrorCode::OBJECT_NOT_FOUND);
+    const auto& metadata = accessor.Get();
+    if (metadata.data_type != ObjectDataType::METADATA ||
+        metadata.size > (16ULL << 20))
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    if (!metadata.AllReplicas([](const Replica& replica) {
+            return replica.is_memory_replica() && replica.is_completed() &&
+                   !replica.has_invalid_mem_handle();
+        }))
+        return tl::unexpected(ErrorCode::REPLICA_IS_NOT_READY);
+    auto replicas = GetReadableReplicaDescriptors(metadata);
+    if (replicas.empty())
+        return tl::unexpected(ErrorCode::REPLICA_IS_NOT_READY);
+    metadata.GrantReadLease(std::chrono::milliseconds(default_kv_lease_ttl_));
+    return MetadataQueryResponse{
+        GetReplicaListResponse(std::move(replicas), default_kv_lease_ttl_,
+                               metadata.object_checksum),
+        UuidToString(metadata.metadata_incarnation)};
+}
+
+// First write a complete temporary METADATA object, then atomically move its
+// ownership to the destination. Data transfer failure cannot damage the old
+// value.
+tl::expected<bool, ErrorCode> MasterService::CompareExchangeMetadata(
+    const UUID& client_id, const std::string& key,
+    const std::string& expected_token, const std::string& staged_key,
+    const TenantId& tenant_id) {
+    if (enable_oplog_ || enable_ha_)
+        return tl::unexpected(ErrorCode::NOT_SUPPORTED);
+    if (key.empty() || !staged_key.starts_with(key + "/.cas/") ||
+        staged_key == key)
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    std::unique_lock policy_lock(tenant_quota_policy_mutex_, std::defer_lock);
+    TenantId tenant = ResolveRequestTenantId(tenant_id);
+    if (enable_multi_tenants_) {
+        policy_lock.lock();
+        auto resolved = ResolveTenantIdForWriteLocked(tenant_id);
+        if (!resolved) return tl::unexpected(resolved.error());
+        tenant = std::move(*resolved);
+    }
+    std::shared_lock snapshot_lock(snapshot_mutex_);
+    const auto dst_index = getShardIndex(tenant, key);
+    const auto src_index = getShardIndex(tenant, staged_key);
+    MetadataShardAccessorRW first(this, std::min(dst_index, src_index));
+    std::unique_ptr<MetadataShardAccessorRW> second;
+    if (dst_index != src_index)
+        second = std::make_unique<MetadataShardAccessorRW>(
+            this, std::max(dst_index, src_index));
+    auto& src_shard = src_index <= dst_index ? first : *second;
+    auto& dst_shard = dst_index <= src_index ? first : *second;
+    auto source_tenant = src_shard->tenants.find(tenant);
+    if (source_tenant == src_shard->tenants.end()) return false;
+    auto& src = source_tenant->second;
+    auto source = src.metadata.find(staged_key);
+    if (source == src.metadata.end()) return false;
+    const auto usable = [](const TenantState& state, const std::string& name,
+                           const ObjectMetadata& metadata) {
+        return metadata.data_type == ObjectDataType::METADATA &&
+               metadata.size > 0 && metadata.size <= (16ULL << 20) &&
+               metadata.group_id.empty() &&
+               !metadata.GetCommittedSoftPinTimeout().has_value() &&
+               !state.processing_keys.contains(name) &&
+               !state.replication_tasks.contains(name) &&
+               !state.offloading_tasks.contains(name) &&
+               !state.promotion_tasks.contains(name) &&
+               !state.promotion_candidates.contains(name) &&
+               !state.dynamic_replication_pending.contains(name) &&
+               !state.dynamic_replication_cooldowns.contains(name) &&
+               metadata.AllReplicas([](const Replica& replica) {
+                   return replica.is_memory_replica() &&
+                          replica.is_completed() && !replica.is_busy() &&
+                          !replica.has_invalid_mem_handle();
+               });
+    };
+    if (source->second.client_id != client_id)
+        return tl::unexpected(ErrorCode::ILLEGAL_CLIENT);
+    if (!usable(src, staged_key, source->second))
+        return tl::unexpected(ErrorCode::OBJECT_REPLICA_BUSY);
+    auto& dst = GetOrCreateTenantState(dst_shard.get(), tenant);
+    auto current = dst.metadata.find(key);
+    if (current == dst.metadata.end()) {
+        if (!expected_token.empty()) return false;
+    } else {
+        if (UuidToString(current->second.metadata_incarnation) !=
+            expected_token)
+            return false;
+        if (!usable(dst, key, current->second))
+            return tl::unexpected(ErrorCode::OBJECT_REPLICA_BUSY);
+    }
+    // Reserve before destructive changes. The node move transfers its quota
+    // ledger and replica ownership without copying or aliasing allocations.
+    dst.metadata.reserve(dst.metadata.size() + 1);
+    source = src.metadata.find(staged_key);
+    current = dst.metadata.find(key);
+    auto node = src.metadata.extract(source);
+    node.key() = key;
+    node.mapped().user_key = key;
+    node.mapped().hard_pinned = true;
+    if (current != dst.metadata.end()) {
+        auto retired = PopReplicasWithCacheTotalAccounting(current->second);
+        const auto release_at =
+            std::chrono::system_clock::now() +
+            std::max(std::chrono::milliseconds(default_kv_lease_ttl_),
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         put_start_release_timeout_sec_));
+        {
+            std::lock_guard lock(discarded_replicas_mutex_);
+            discarded_replicas_.emplace_back(std::move(retired), release_at);
+        }
+        EraseMetadata(dst, current, tenant, QuotaEraseMode::kFull, &dst_shard);
+    }
+    dst.metadata.insert(std::move(node));
+    return true;
+}
+
 auto MasterService::GetReplicaList(const std::string& key,
                                    const TenantId& tenant_id)
     -> tl::expected<GetReplicaListResponse, ErrorCode> {
@@ -5854,6 +5979,7 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
 
                 if (metadata.size == slice_length && !has_read_lease) {
                     metadata.client_id = client_id;
+                    metadata.metadata_incarnation = generate_uuid();
                     metadata.put_start_time = now;
 
                     const auto previous_kv_media = KvMediaSnapshot(metadata);

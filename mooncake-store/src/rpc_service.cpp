@@ -269,6 +269,42 @@ WrappedMasterService::GetReplicaListByRegex(const std::string& str,
         });
 }
 
+tl::expected<MetadataQueryResponse, ErrorCode>
+WrappedMasterService::GetMetadataForUpdate(const std::string& key,
+                                           const std::string& tenant_id) {
+    return execute_rpc(
+        "GetMetadataForUpdate",
+        [&] {
+            return WithRequestTenant(
+                master_service_.IsTenantQuotaEnabled()
+                    ? std::string_view(tenant_id)
+                    : TenantId::kDefaultValue,
+                [&](const TenantId& tenant) {
+                    return master_service_.GetMetadataForUpdate(key, tenant);
+                });
+        },
+        [&](auto& timer) { timer.LogRequest("key=", key); }, [] {}, [] {});
+}
+
+tl::expected<bool, ErrorCode> WrappedMasterService::CompareExchangeMetadata(
+    const UUID& client_id, const std::string& key,
+    const std::string& expected_token, const std::string& staged_key,
+    const std::string& tenant_id) {
+    return execute_rpc(
+        "CompareExchangeMetadata",
+        [&] {
+            return WithRequestTenant(
+                master_service_.IsTenantQuotaEnabled()
+                    ? std::string_view(tenant_id)
+                    : TenantId::kDefaultValue,
+                [&](const TenantId& tenant) {
+                    return master_service_.CompareExchangeMetadata(
+                        client_id, key, expected_token, staged_key, tenant);
+                });
+        },
+        [&](auto& timer) { timer.LogRequest("key=", key); }, [] {}, [] {});
+}
+
 tl::expected<GetReplicaListResponse, ErrorCode>
 WrappedMasterService::GetReplicaList(const std::string& key,
                                      const std::string& tenant_id) {
@@ -1765,6 +1801,12 @@ void RegisterRpcService(
         &wrapped_master_service);
     server.register_handler<
         &mooncake::WrappedMasterService::GetReplicaListByRegex>(
+        &wrapped_master_service);
+    server.register_handler<
+        &mooncake::WrappedMasterService::GetMetadataForUpdate>(
+        &wrapped_master_service);
+    server.register_handler<
+        &mooncake::WrappedMasterService::CompareExchangeMetadata>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::GetReplicaList>(
         &wrapped_master_service);

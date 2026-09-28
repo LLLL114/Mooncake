@@ -380,6 +380,13 @@ class MasterService {
      * @return ErrorCode::OK on success, ErrorCode::REPLICA_IS_NOT_READY if not
      * ready
      */
+    tl::expected<MetadataQueryResponse, ErrorCode> GetMetadataForUpdate(
+        const std::string& key, const TenantId& tenant_id);
+    tl::expected<bool, ErrorCode> CompareExchangeMetadata(
+        const UUID& client_id, const std::string& key,
+        const std::string& expected_token, const std::string& staged_key,
+        const TenantId& tenant_id);
+
     auto GetReplicaList(const std::string& key, const TenantId& tenant_id)
         -> tl::expected<GetReplicaListResponse, ErrorCode>;
 
