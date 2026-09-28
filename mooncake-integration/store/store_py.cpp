@@ -3105,6 +3105,12 @@ PYBIND11_MODULE(store, m) {
             py::arg("allow_staging") = false,
             "Read translated templates synchronously, returning exact "
             "completion per object. Staging requires explicit opt-in.")
+        .def_property_readonly(
+            "supports_ranged_read_staging",
+            [](const MooncakeStorePyWrapper &self) {
+                return self.is_client_initialized() && !self.use_dummy_client_;
+            },
+            "Whether template reads support per-call staging opt-in")
         .def(
             "prepare_get_into_ranges_snapshot",
             [](MooncakeStorePyWrapper &self,

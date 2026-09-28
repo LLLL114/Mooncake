@@ -197,6 +197,23 @@ while their freshly read contents and CAS version agree. Object existence and
 replica leases are still checked per operation. Derived caches are excluded from
 canonical dataclass serialization, so page/object identities do not change.
 
+For explicitly opted-in host reads, the native ranged reader may replace at least
+32 small ranges (each at most 512 bytes) of one memory object with one contiguous read
+into registered client scratch followed by local scatter copies. The read span
+is bounded by four times the useful bytes and the call borrows at most 8 MiB
+from the existing client buffer pool. It never crosses an object boundary.
+The policy is guarded by a per-call `allow_staging` flag, defaulting to false.
+Ordinary Store reads and template API calls without opt-in remain direct. The KV
+prepared page reader explicitly opts in when the native capability is present;
+there is no process-wide or per-client mutable switch. DummyClient retains its
+original direct path. Promotion to a general Store default requires separate
+workload validation and review.
+Device destinations, sparse ranges, invalid ranges and exhausted scratch use
+the direct path. Completion and lease errors remain errors; failed transfers do
+not copy uninitialized scratch into the destination. All transfers and copies
+finish before the synchronous API returns. This trades some bandwidth for fewer
+RDMA work requests and requires no extra persistent Store allocation.
+
 ## KV Store physical layout conversion
 
 Readers can restore any stored PLHD, LPHD or HPLD object order into any of those
@@ -234,8 +251,9 @@ Prepared KV page readers use the optional native ranged-read template API when
 available. `prepare_get_into_ranges_template(destinations, sources, sizes)`
 retains only validated relative byte offsets and positive lengths. Each call to
 `get_into_ranges_from_template(snapshot, templates, buffer_ptrs, buffer_indices,
-keys, translations)` supplies fresh keys and registered
-destination regions.
+keys, translations, allow_staging=False)` supplies fresh keys and registered
+destination regions. `supports_ranged_read_staging` advertises per-call opt-in
+for RealClient; older bindings continue to use the original call signature.
 It returns one exact-completion boolean per template instance. Expansion and
 per-range result checking run in C++ with the GIL released; the Python hot path
 passes object-level bindings instead of boxing every range.
@@ -262,14 +280,18 @@ When `supports_planned_range_reads` is available, the reader caches a native
 program with `prepare_get_into_ranges_plan`: destination runs reference a
 shared source-object geometry table. A load supplies only page-key prefixes
 and region translations through `get_into_ranges_from_plan`. The binding
-merges the bound runs by destination; RealClient reuses metadata
+merges the bound runs by destination; RealClient reuses metadata and staging
 per source object, then executes the supplied traversal. The program caches
 layout suffixes, never full runtime keys, addresses, replicas or leases.
 
 The default is false. The default mode preserves source-object grouping and
 whole-object fast paths. Destination mode uses ranged reads so downstream
-whole-object batching cannot reorder the plan. Older bindings, or pages larger than a native batch, use individual ordered
-run templates for correctness; this fallback can have higher binding overhead. The performance results require the matching
+whole-object batching cannot reorder the plan. Receiver staging remains an
+independent opt-in and the compiled path retains object-level staging
+eligibility. No staging thresholds or global transport settings change.
+Older bindings, or pages larger than a native batch, use individual ordered
+run templates for correctness; this fallback can have higher binding overhead
+and lower staging eligibility. The performance results require the matching
 native plan binding.
 
 This option does not implement owner gather. A gather-capable Transfer Engine

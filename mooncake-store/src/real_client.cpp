@@ -4404,9 +4404,11 @@ RealClient::get_into_ranges_internal(
 
     // A caller may supply an already compiled traversal of source ranges:
     // {buffer, object, first fragment, past-last fragment}. This is execution
-    // order, not a transport sorting policy. Metadata remains per object.
+    // order, not a transport sorting policy. Metadata/staging remain per
+    // object.
     struct PlannedTransfer {
         size_t index = SIZE_MAX;
+        bool staged = false;
     };
     std::vector<std::vector<PlannedTransfer>> planned_transfers;
     if (read_plan) {
@@ -4460,6 +4462,12 @@ RealClient::get_into_ranges_internal(
     };
     std::unordered_map<std::string, ScatterLease> scatter_leases;
     std::vector<TransferEngine::ScatterTransferRange> memory_transfers;
+    // Staging is optional and bounded independently of the registered pool.
+    // Dense small reads use one RDMA read plus a host scatter instead of one
+    // work request per head/token. Sparse reads and device destinations retain
+    // the direct path. A failed allocation is not a failed user read.
+    constexpr size_t kMaxStagingBytes = 8 * 1024 * 1024;
+    size_t staging_bytes = 0;
     for (size_t i = 0; i < buffer_count; ++i) {
         if (!buffers[i] || (!buffer_capacities && capacities[i] == 0)) {
             continue;
@@ -4577,8 +4585,113 @@ RealClient::get_into_ranges_internal(
                 if (inserted)
                     lease_it->second.expires_at =
                         metadata.query_result.lease_timeout;
+                // Only callers that explicitly select this policy may overread
+                // into scratch. Ordinary Store reads skip the entire staging
+                // path. Staged spans use one READ; other ranges retain the
+                // caller's submission order.
+                if (allow_staging) {
+                    size_t first = std::numeric_limits<size_t>::max(), last = 0;
+                    size_t useful = 0;
+                    bool stage =
+                        sizes.size() >= 32 && client_buffer_allocator_ &&
+                        !runtime_accelerator.FindDeviceForPointer(buffers[i]);
+                    if (stage) {
+                        for (size_t k = 0; k < sizes.size(); ++k) {
+                            if (sizes[k] == 0 || sizes[k] > 512 ||
+                                dst_offsets[k] > capacities[i] ||
+                                sizes[k] > capacities[i] - dst_offsets[k] ||
+                                is_object_range_overflow(src_offsets[k],
+                                                         sizes[k],
+                                                         metadata.total_size) ||
+                                is_object_range_overflow(
+                                    src_offsets[k], sizes[k], handle.size_) ||
+                                useful > kMaxStagingBytes - sizes[k]) {
+                                stage = false;
+                                break;
+                            }
+                            first = std::min(first, src_offsets[k]);
+                            last = std::max(last, src_offsets[k] + sizes[k]);
+                            useful += sizes[k];
+                        }
+                    }
+                    const size_t span = stage ? last - first : 0;
+                    stage = stage && span <= 4 * useful &&
+                            span <= kMaxStagingBytes - staging_bytes;
+                    if (stage) {
+                        auto allocated =
+                            client_buffer_allocator_->allocate(span);
+                        if (allocated) {
+                            auto scratch = std::make_shared<BufferHandle>(
+                                std::move(*allocated));
+                            auto geometry =
+                                std::make_shared<std::array<size_t, 3>>(
+                                    std::array<size_t, 3>{0, first, span});
+                            staging_bytes += span;
+                            if (read_plan)
+                                planned_transfers[i][j] = {
+                                    memory_transfers.size(), true};
+                            memory_transfers.push_back(
+                                TransferEngine::ScatterTransferRange{
+                                    .opcode = TransferRequest::READ,
+                                    .remote_segment =
+                                        handle.transport_endpoint_,
+                                    .remote_base_offset =
+                                        handle.buffer_address_,
+                                    .remote_size = handle.size_,
+                                    .local_buffer = scratch->ptr(),
+                                    .local_capacity = span,
+                                    .local_offsets = std::span<const size_t>(
+                                        &(*geometry)[0], 1),
+                                    .remote_offsets = std::span<const size_t>(
+                                        &(*geometry)[1], 1),
+                                    .lengths = std::span<const size_t>(
+                                        &(*geometry)[2], 1),
+                                    .on_fragment_complete =
+                                        [scratch, geometry, first,
+                                         dst = buffers[i],
+                                         results = &range_results,
+                                         sources = &src_offsets,
+                                         destinations = &dst_offsets,
+                                         sizes = &sizes,
+                                         lease = &lease_it->second](
+                                            size_t, const Status &status) {
+                                            if (!status.ok() || lease->error ||
+                                                std::chrono::steady_clock::
+                                                        now() >=
+                                                    lease->expires_at) {
+                                                auto error = lease->error.value_or(
+                                                    status.ok()
+                                                        ? ErrorCode::
+                                                              LEASE_EXPIRED
+                                                        : scatter_transfer_error(
+                                                              status));
+                                                std::fill(
+                                                    results->begin(),
+                                                    results->end(),
+                                                    tl::unexpected(error));
+                                                return;
+                                            }
+                                            for (size_t k = 0;
+                                                 k < sizes->size(); ++k) {
+                                                std::memcpy(
+                                                    static_cast<char *>(dst) +
+                                                        (*destinations)[k],
+                                                    static_cast<char *>(
+                                                        scratch->ptr()) +
+                                                        (*sources)[k] - first,
+                                                    (*sizes)[k]);
+                                                (*results)[k] =
+                                                    static_cast<int64_t>(
+                                                        (*sizes)[k]);
+                                            }
+                                        },
+                                });
+                            continue;
+                        }
+                    }
+                }
                 if (read_plan)
-                    planned_transfers[i][j] = {memory_transfers.size()};
+                    planned_transfers[i][j] = {memory_transfers.size(), false};
                 memory_transfers.push_back(TransferEngine::ScatterTransferRange{
                     .opcode = TransferRequest::READ,
                     .remote_segment = handle.transport_endpoint_,
@@ -4662,11 +4775,17 @@ RealClient::get_into_ranges_internal(
     std::vector<TransferEngine::ScatterTransferRange> ordered_transfers;
     if (read_plan) {
         ordered_transfers.reserve(read_plan->size());
+        std::vector<bool> staged(memory_transfers.size(), false);
         for (const auto &step : *read_plan) {
             auto [i, j, first, end] = step;
             const auto mapping = planned_transfers[i][j];
             if (mapping.index == SIZE_MAX) continue;
             const auto &source = memory_transfers[mapping.index];
+            if (mapping.staged) {
+                if (!staged[mapping.index]) ordered_transfers.push_back(source);
+                staged[mapping.index] = true;
+                continue;
+            }
             auto transfer = source;
             transfer.local_offsets =
                 source.local_offsets.subspan(first, end - first);

@@ -499,9 +499,67 @@ def test_native_dummy_client_uses_its_own_local_allocator(cluster):
         _stop(proxy)
 
 
+@pytest.mark.parametrize("snapshot", [False, True])
+@pytest.mark.parametrize("pool_bytes", [1024, 32 << 20])
+def test_native_dense_small_ranges_and_staging_exhaustion(
+    cluster, snapshot, pool_bytes
+):
+    """Dense overread, sparse fallback, malformed ranges, missing keys and sentinels."""
+    import ctypes
+    from mooncake.store import MooncakeDistributedStore
+
+    addresses, _, _ = cluster
+    raw = MooncakeDistributedStore()
+    assert (
+        raw.setup(
+            f"127.0.0.1:{_port()}", addresses[1], 0, pool_bytes, "tcp", "", addresses[0]
+        )
+        == 0
+    )
+    key = uuid.uuid4().hex
+    payload = bytes((i * 17 + i // 256) % 251 for i in range(32768))
+    dst = (ctypes.c_ubyte * 65536)()
+    ptr = ctypes.addressof(dst)
+    assert raw.register_buffer(ptr, len(dst)) == 0
+    try:
+        writer = _real(addresses)
+        try:
+            assert writer.put(key, payload) == 0
+        finally:
+            writer.close()
+        reader = raw.get_into_ranges
+        if snapshot:
+            handle = raw.prepare_get_into_ranges_snapshot([key])
+            reader = lambda *args: raw.get_into_ranges_from_snapshot(handle, *args)
+        for sparse in (False, True):
+            ctypes.memset(ptr, 0xCD, len(dst))
+            count = 128 if not sparse else 32
+            src = [i * (256 if not sparse else 1024) for i in range(count)]
+            offsets = [13 + i * 137 for i in reversed(range(count))]
+            sizes = [128] * count
+            result = reader([ptr], [[key]], [[offsets]], [[src]], [[sizes]])
+            assert result == [[[128] * count]]
+            expected = bytearray([0xCD] * len(dst))
+            for d, s in zip(offsets, src):
+                expected[d : d + 128] = payload[s : s + 128]
+            assert bytes(dst) == expected
+        # Invalid members must still fail individually, even in a dense batch.
+        src = [i * 256 for i in range(128)]
+        src[-1] = len(payload)
+        result = reader(
+            [ptr], [[key]], [[[i * 128 for i in range(128)]]], [[src]], [[[128] * 128]]
+        )
+        assert result[0][0][:-1] == [128] * 127 and result[0][0][-1] < 0
+        result = raw.get_into_ranges(
+            [ptr], [[key + "-absent"]], [[[0] * 32]], [[[0] * 32]], [[[128] * 32]]
+        )
+        assert all(x < 0 for x in result[0][0])
+    finally:
+        raw.unregister_buffer(ptr)
+        raw.close()
 
 
-@pytest.mark.parametrize("allow_staging", [None, False])
+@pytest.mark.parametrize("allow_staging", [None, False, True])
 def test_native_templates_validate_translate_and_reuse_geometry(cluster, allow_staging):
     import ctypes
     from concurrent.futures import ThreadPoolExecutor
@@ -509,7 +567,7 @@ def test_native_templates_validate_translate_and_reuse_geometry(cluster, allow_s
     addresses, _, _ = cluster
     raw = _real(addresses)
     other = _real(addresses)
-    assert getattr(raw, "supports_ranged_read_staging", False) is False
+    assert raw.supports_ranged_read_staging is True
     staging_options = {} if allow_staging is None else {"allow_staging": allow_staging}
     key = uuid.uuid4().hex
     payload = bytes(i % 251 for i in range(32768))
@@ -579,7 +637,7 @@ def test_native_templates_validate_translate_and_reuse_geometry(cluster, allow_s
 
 
 @pytest.mark.parametrize("remote_access", [False, True])
-@pytest.mark.parametrize("allow_staging", [False])
+@pytest.mark.parametrize("allow_staging", [False, True])
 def test_cross_object_templates_preserve_holes_and_results(
     cluster, remote_access, allow_staging
 ):
@@ -657,7 +715,7 @@ def test_cross_object_templates_preserve_holes_and_results(
         raw.close()
 
 
-@pytest.mark.parametrize("allow_staging", [False])
+@pytest.mark.parametrize("allow_staging", [False, True])
 def test_native_destination_plan_reuses_sources_and_binds_pages(cluster, allow_staging):
     """Cross-object runs preserve page identity, holes and grouped staging."""
     import ctypes
