@@ -381,10 +381,31 @@ class KVCacheStore:
             cached = tuple(self._manifests)
         preferred = tuple(dict.fromkeys((self.manifest.layout.layout_id, *cached)))
         selected: list[str] = []
-        for start in range(0, len(pages), self.page_batch_size):
+        objects_per_page = sum(2 * len(e.key_suffixes) for e in catalog.entries)
+        suffix_bytes = sum(
+            len(key.encode("utf-8")) - 1
+            for entry in catalog.entries
+            for key in entry.object_keys("x")
+        )
+        start = 0
+        while start < len(pages):
             if cancelled is not None and cancelled():
                 return KVCacheStoreReadContext(operation_id, catalog, (), (), ())
-            subset = pages[start : start + self.page_batch_size]
+            stop, probe_bytes = start, 0
+            while stop < min(start + self.page_batch_size, len(pages)):
+                page_bytes = objects_per_page * len(pages[stop].encode("utf-8"))
+                page_bytes += suffix_bytes
+                if (
+                    (stop - start + 1) * objects_per_page
+                    > self.planning_limits.max_probe_keys
+                    or probe_bytes + page_bytes > self.planning_limits.max_probe_bytes
+                ):
+                    break
+                probe_bytes += page_bytes
+                stop += 1
+            # Let the probe planner reject a single page that cannot fit.
+            stop = max(start + 1, stop)
+            subset = pages[start:stop]
             probe = plan_kv_cache_store_probe(
                 catalog, subset, limits=self.planning_limits
             )
@@ -397,6 +418,7 @@ class KVCacheStore:
             selected.extend(chosen)
             if len(chosen) < len(subset):
                 break
+            start = stop
         entries = {e.layout_id: e for e in catalog.entries}
         chosen_ids = tuple(dict.fromkeys(selected))
         found: dict[str, KVCacheStoreManifest] = {}
