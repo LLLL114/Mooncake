@@ -30,6 +30,10 @@ def audit_trace(root, policy, capacities):
     last = window = samples = confirmations = offset = suggestion = 0
     total = 0.
     changes = 0
+    integer = None
+    if policy >= 3:
+        from tail_gain_control import GainReplay
+        integer = GainReplay(capacities, policy == 4)
     for expected_sequence, (ns, q0, q1, sequence, weight, first, applied) in enumerate(RECORD.iter_unpack(raw)):
         if sequence != expected_sequence or ns <= last:
             raise ValueError('SQ sequence or timestamp mismatch')
@@ -47,10 +51,14 @@ def audit_trace(root, policy, capacities):
                 if confirmations == 3:
                     offset = wanted
                 window = ns; total = 0.; samples = 0
-        target_mass = min(4096, max(0, mass + offset * 256))
-        # Rational cumulative allocation; no C++ table lookup here.
-        phase = sequence % 256
-        expected = ((phase + 1) * target_mass) // 256 - (phase * target_mass) // 256
+        if integer is not None:
+            expected, offset = integer.next(ns, q0, q1)
+            target_mass = expected * 256
+        else:
+            target_mass = min(4096, max(0, mass + offset * 256))
+            # Rational cumulative allocation; no C++ table lookup here.
+            phase = sequence % 256
+            expected = ((phase + 1) * target_mass) // 256 - (phase * target_mass) // 256
         if applied != offset or first != expected or weight != target_mass / 4096:
             raise ValueError('controller or integer quota replay mismatch')
         changes += previous != offset
@@ -100,6 +108,8 @@ def audit_trace(root, policy, capacities):
     missing = [r for r in eligible if r['request_id'] not in used]
     if len(missing) > 1 or (missing and missing[0]['submitted_ns'] != max(x['submitted_ns'] for x in eligible)):
         raise ValueError('internal request coverage gap')
+    if integer is not None:
+        (root / 'TG-controller-windows.json').write_text(json.dumps(integer.events))
     return dict(controller_records=meta['count'], decisions=len(rows), matched_normal=len(matched),
                 probes=len(probes), whole_run_offset_changes=changes, base=meta['base'],
                 independently_replayed=True, data_verified=m['data_verified'])

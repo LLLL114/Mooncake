@@ -11,6 +11,7 @@ namespace tent_sq {
 void Controller::init(double a, double b) {
     *this = Controller{};
     c0 = a; c1 = b;
+    integer_base = held = int(std::llround(a / (a + b) * 16));
     const uint32_t mass = uint32_t(std::llround(a / (a + b) * 4096));
     base = double(mass) / 4096;
     for (int j = 0; j < 3; ++j) {
@@ -40,6 +41,48 @@ Choice Controller::next(uint64_t now, uint64_t q0, uint64_t q1, bool bounded) {
     const auto count = table[offset + 1][sequence++ % 256];
     return {std::clamp(base + double(offset) / 16, 0., 1.), count, offset};
 }
+
+Choice Controller::integer(uint64_t now, uint64_t q0, uint64_t q1, bool gain) {
+    if (gain) {
+        if (!last || now - last > 200000000) {
+            window = now; sum0 = sum1 = 0; samples = 0;
+            proposed = -1; confirmations = 0;
+        }
+        last = now;
+        sum0 += double(q0); sum1 += double(q1); ++samples;
+        if (now - window >= 20000000) {
+            const double a = sum0 / samples, b = sum1 / samples;
+            auto finish = [&](int k) {
+                return std::max(k ? (a + k * 65536.) / c0 : 0.,
+                                k < 16 ? (b + (16 - k) * 65536.) / c1 : 0.);
+            };
+            const double x = std::clamp((c0 * 1048576. + c0 * b - c1 * a) /
+                                        (c0 + c1) / 65536., 0., 16.);
+            const int points[] = {0, 16, int(std::floor(x)), int(std::ceil(x)), held};
+            int best = held;
+            for (int k : points) {
+                const double f = finish(k), current = finish(best);
+                if (f < current || (f == current &&
+                    (std::abs(k - held) < std::abs(best - held) ||
+                     (std::abs(k - held) == std::abs(best - held) && k < best)))) best = k;
+            }
+            const int target = held + std::clamp(best - held, -2, 2);
+            const double margin = std::max(32768. / std::min(c0, c1), 104857.6 / (c0 + c1));
+            if (target != held && finish(held) - finish(target) > margin) {
+                confirmations = target == proposed ? std::min(3, confirmations + 1) : 1;
+                proposed = target;
+                if (confirmations == 3 && (!changed_at || now - changed_at >= 100000000)) {
+                    held = target; changed_at = now; confirmations = 0; proposed = -1;
+                }
+            } else {
+                confirmations = 0; proposed = -1;
+            }
+            window = now; sum0 = sum1 = 0; samples = 0;
+        }
+    }
+    ++sequence;
+    return {double(held) / 16, uint32_t(held), held - integer_base};
+}
 }
 namespace {
 // Experimental scope: one selector and allocation caller, two fixed named NICs.
@@ -66,14 +109,15 @@ void capture(int d, uint64_t q) noexcept {
 Choice choose(int a, int b, uint64_t now) noexcept {
     if (a != rails[0] || b != rails[1]) { error = EINVAL; return {.5, 8, 0}; }
     const auto seq = state.sequence;
-    const auto choice = state.next(now, queues[a], queues[b], policy == 2);
+    const auto choice = policy >= 3 ? state.integer(now, queues[a], queues[b], policy == 4)
+                                   : state.next(now, queues[a], queues[b], policy == 2);
     if (count < Limit) records[count++] = {now, queues[a], queues[b], seq, choice.weight, choice.first, choice.offset};
     else error = EOVERFLOW;
     return choice;
 }
 }
 extern "C" int tent_sq_configure(int p, double a, double b) noexcept {
-    if (configured || p < 1 || p > 2 || !std::isfinite(a) || !std::isfinite(b) || a <= 0 || b <= 0) return -EINVAL;
+    if (configured || p < 1 || p > 4 || !std::isfinite(a) || !std::isfinite(b) || a <= 0 || b <= 0) return -EINVAL;
     try { records = std::make_unique<Record[]>(Limit); } catch (...) { return -ENOMEM; }
     configured = true; policy = p; state.init(a, b); return 0;
 }

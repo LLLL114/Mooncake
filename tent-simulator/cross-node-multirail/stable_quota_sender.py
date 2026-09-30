@@ -10,7 +10,7 @@ import native_sender_extended as sender
 
 def main():
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument('--stable-policy', type=int, choices=(1, 2), required=True)
+    parser.add_argument('--stable-policy', type=int, choices=(1, 2, 3, 4), required=True)
     parser.add_argument('--rail0-bps', type=float, required=True)
     parser.add_argument('--rail1-bps', type=float, required=True)
     controls, rest = parser.parse_known_args()

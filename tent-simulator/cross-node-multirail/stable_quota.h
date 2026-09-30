@@ -9,8 +9,12 @@ struct Controller {
     double c0 = 0, c1 = 0, base = 0, sum = 0;
     uint64_t sequence = 0, window = 0, last = 0, samples = 0;
     int offset = 0, suggestion = 0, confirmations = 0;
+    double sum0 = 0, sum1 = 0;
+    int integer_base = 0, held = 0, proposed = -1;
+    uint64_t changed_at = 0;
     void init(double a, double b);
     Choice next(uint64_t now, uint64_t q0, uint64_t q1, bool bounded);
+    Choice integer(uint64_t now, uint64_t q0, uint64_t q1, bool gain);
 };
 void bind(int dev, const char* name) noexcept;
 void capture(int dev, uint64_t inflight) noexcept;
