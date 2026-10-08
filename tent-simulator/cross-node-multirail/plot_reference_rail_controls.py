@@ -29,7 +29,7 @@ def main():
                 ax.scatter([i-.07,i,i+.07],values,color=colors[i],s=42,zorder=3)
                 median=statistics.median(values);ax.plot([i-.18,i+.18],[median,median],color='black',lw=2)
             ax.set(xticks=range(3),xticklabels=labels,ylabel=label,title=profile.replace('rps',' requests/s'))
-            ax.grid(axis='y',alpha=.2);ax.set_ylim(bottom=0)
+            ax.grid(axis='y',alpha=.2);ax.set_ylim(bottom=0,top=ax.get_ylim()[1]*1.10)
     fig.suptitle('Original routing: matched offered load, 6 lanes\nDots: individual runs; black bars: medians (3 runs each)',fontsize=12)
     for ext in ('svg','png'):fig.savefig(out/('reference-rail-controls.'+ext),dpi=160)
     plt.close(fig)
