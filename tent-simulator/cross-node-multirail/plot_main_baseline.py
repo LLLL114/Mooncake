@@ -60,7 +60,40 @@ def main():
         ax.set(xticks=range(3),xticklabels=profiles,ylabel=label,ylim=(0,maximum*1.15));ax.grid(axis='y',alpha=.2)
     fig.suptitle('Current main stock library: performance baseline\nEach dot is one run; black bars are medians of 3 runs',fontsize=11)
     save(fig,'main-stock-performance')
+    plot_raw_window()
     print('MAIN_FIGURES_COMPLETE',out)
+
+
+def plot_raw_window():
+    sys.path.insert(0,str(BASE/'plot-deps-osc-20260917'))
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from PIL import Image
+    a=json.loads((ROOT/'analysis.json').read_text());out=ROOT/'figures'
+    gates={g['profile']:g['observation_gate_pass'] for g in a['groups']}
+    colors=('#1768ac','#c95c24','#268368')
+    fig,axes=plt.subplots(2,3,figsize=(13,6),layout='constrained')
+    for col,profile in enumerate(('225rps','675rps','saturated')):
+        for run in sorted(a['runs'],key=lambda r:r['repeat']):
+            if run['variant']!='trace' or run['profile']!=profile:continue
+            root=Path(run['run_path']);m=json.loads((root/'manifest.json').read_text())
+            _,trace=load_trace(root);j=str(run['audit']['rail0_column'])
+            selected=[r for r in trace if r['mode']==1 and 20000000000<=r['ns']-m['measurement_start_ns']<20200000000]
+            times=[(r['ns']-m['measurement_start_ns']-20000000000)/1e6 for r in selected]
+            for line in range(2):
+                values=[r['weight'+j] if line==0 else r['assigned'+j]/r['total_bytes'] for r in selected]
+                axes[line,col].plot(times,values,lw=.9,color=colors[run['repeat']-1],label=f"Repeat {run['repeat']}")
+        for line in range(2):
+            ax=axes[line,col];ax.set(xlim=(0,200),ylim=(0,1),xlabel='Time after 20s (ms)',
+                ylabel='Rail 0 raw weight' if line==0 else 'Rail 0 per-request byte share',
+                title=profile+('' if gates[profile] else '\nObservation gate failed'))
+            ax.grid(alpha=.2);ax.legend(fontsize=8)
+    fig.suptitle('Raw decision detail: the same fixed 20.000-20.200s window for all runs\nNo averaging; lines connect successive normal decisions; full-run metrics remain 10-60s',fontsize=11)
+    fig.savefig(out/'main-raw-window.svg');fig.savefig(out/'main-raw-window.png',dpi=90);plt.close(fig)
+    im=Image.open(out/'main-raw-window.png').convert('RGB');im.thumbnail((800,420))
+    im.quantize(colors=16).save(out/'main-raw-window-qa.png',optimize=True)
+    print('MAIN_RAW_WINDOW_COMPLETE',out)
 
 
 if __name__=='__main__':main()
