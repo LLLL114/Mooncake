@@ -34,6 +34,7 @@ class HighPerformanceTcpClient {
         uint64_t connect_timeout_ms{2000};
         uint64_t progress_timeout_ms{30000};
         size_t connections_per_peer{4};
+        uint64_t idle_connection_timeout_ms{60000};
     };
 
     struct Operation {
@@ -71,8 +72,9 @@ class HighPerformanceTcpClient {
 
     // Best-effort cancellation for one logical request. If the request is
     // still in the transport dispatch queue, the adapter's cancel flag settles
-    // it; if it already reached a lane, this posts cancellation to that owner.
-    Status cancelRequest(size_t owner_worker, uint64_t request_id);
+    // it; otherwise cancellation is posted to every worker that may own one of
+    // its slices.
+    Status cancelRequest(uint64_t request_id);
 
     uint64_t connectionsCreatedForTest() const {
         return connections_created_.load(std::memory_order_acquire);

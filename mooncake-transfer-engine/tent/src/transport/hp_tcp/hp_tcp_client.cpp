@@ -40,6 +40,7 @@ class HighPerformanceTcpClient::Lane
     }
 
     void cancelAll(TransferStatusEnum terminal) {
+        cancelTimer();
         while (!queue_.empty()) {
             Operation operation = std::move(queue_.front());
             queue_.pop_front();
@@ -50,9 +51,6 @@ class HighPerformanceTcpClient::Lane
             return;
         }
         forced_terminal_ = terminal;
-        ++timer_generation_;
-        std::error_code ignored;
-        timer_.cancel(ignored);
         resolver_.cancel();
         closeDirty();
         // The outstanding async callback owns the final completion. Releasing
@@ -133,7 +131,12 @@ class HighPerformanceTcpClient::Lane
                 self->runHandler(epoch, [&] {
                     if (self->finishForcedIfAny()) return;
                     if (error) {
-                        self->finishIoError(error);
+                        if (error == asio::error::host_not_found)
+                            self->finishCurrent(
+                                FAILED, 0, false,
+                                HighPerformanceTcpStatus::kStaleRegistration);
+                        else
+                            self->finishIoError(error);
                         return;
                     }
                     self->connect(epoch, std::move(results));
@@ -147,7 +150,8 @@ class HighPerformanceTcpClient::Lane
         socket_.close(ignored);
         if (!current_->local_host.empty()) {
             if (results.empty()) {
-                finishIoError(asio::error::host_not_found);
+                finishCurrent(FAILED, 0, false,
+                              HighPerformanceTcpStatus::kStaleRegistration);
                 return;
             }
             std::error_code error;
@@ -173,7 +177,19 @@ class HighPerformanceTcpClient::Lane
             self->runHandler(epoch, [&] {
                 if (self->finishForcedIfAny()) return;
                 if (error) {
-                    self->finishIoError(error);
+                    if (error == asio::error::connection_refused)
+                        self->finishCurrent(
+                            FAILED, 0, false,
+                            HighPerformanceTcpStatus::kStaleRegistration);
+                    else
+                        self->finishIoError(error);
+                    return;
+                }
+                std::error_code option_error;
+                self->socket_.set_option(asio::ip::tcp::no_delay(true),
+                                         option_error);
+                if (option_error) {
+                    self->finishIoError(option_error);
                     return;
                 }
                 self->cancelTimer();
@@ -307,6 +323,9 @@ class HighPerformanceTcpClient::Lane
         auto self = shared_from_this();
         asio::async_read(
             socket_, asio::buffer(data, chunk),
+            [chunk](const std::error_code& error, size_t received) -> size_t {
+                return error ? 0 : chunk - received;
+            },
             [self, epoch, chunk](const std::error_code& error, size_t bytes) {
                 self->runHandler(epoch, [&] {
                     if (self->finishForcedIfAny()) return;
@@ -346,6 +365,24 @@ class HighPerformanceTcpClient::Lane
         ++timer_generation_;
         std::error_code ignored;
         timer_.cancel(ignored);
+    }
+
+    void armIdleTimer() {
+        if (current_ || !queue_.empty() || !socket_.is_open()) return;
+        const uint64_t generation = ++timer_generation_;
+        timer_.expires_after(
+            std::chrono::milliseconds(config_.idle_connection_timeout_ms));
+        auto self = shared_from_this();
+        timer_.async_wait([self, generation](const std::error_code& error) {
+            if (error || generation != self->timer_generation_ ||
+                self->current_ || !self->queue_.empty()) {
+                return;
+            }
+            // Only the client knows that no request is in transit. Closing
+            // here releases receiver capacity without racing a reused WRITE
+            // against server-side eviction. The next operation reconnects.
+            self->closeDirty();
+        });
     }
 
     bool matches(uint64_t epoch) const {
@@ -405,6 +442,7 @@ class HighPerformanceTcpClient::Lane
         completeStandalone(std::move(operation), terminal, bytes,
                            remote_status);
         startNext();
+        armIdleTimer();
     }
 
     void completeStandalone(
@@ -573,14 +611,12 @@ void HighPerformanceTcpClient::cancelRequestOnWorker(size_t worker_id,
     if (worker_id >= worker_states_.size()) return;
     for (auto& [key, lane] : worker_states_[worker_id].lanes) {
         (void)key;
-        if (lane->cancelRequest(request_id)) return;
+        (void)lane->cancelRequest(request_id);
     }
 }
 
-Status HighPerformanceTcpClient::cancelRequest(size_t owner_worker,
-                                               uint64_t request_id) {
-    if (workers_ == nullptr || owner_worker >= worker_states_.size() ||
-        request_id == 0) {
+Status HighPerformanceTcpClient::cancelRequest(uint64_t request_id) {
+    if (workers_ == nullptr || request_id == 0) {
         return Status::InvalidArgument(
             "invalid HP TCP cancellation request" LOC_MARK);
     }
@@ -589,10 +625,13 @@ Status HighPerformanceTcpClient::cancelRequest(size_t owner_worker,
             "HP TCP worker contexts are unavailable" LOC_MARK);
     }
     try {
-        asio::post(workers_->ioContext(owner_worker),
-                   [this, owner_worker, request_id] {
-                       cancelRequestOnWorker(owner_worker, request_id);
-                   });
+        for (size_t worker_id = 0; worker_id < worker_states_.size();
+             ++worker_id) {
+            asio::post(workers_->ioContext(worker_id),
+                       [this, worker_id, request_id] {
+                           cancelRequestOnWorker(worker_id, request_id);
+                       });
+        }
     } catch (const std::exception& error) {
         return Status::InternalError(
             std::string("HP TCP cancellation post failed: ") + error.what() +

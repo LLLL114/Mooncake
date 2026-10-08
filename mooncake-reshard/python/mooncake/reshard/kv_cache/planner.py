@@ -12,7 +12,12 @@ from .part import KVCachePlacementPart
 from .placement import KVCachePlacementManifest
 from .runtime import KVCacheRuntimeBindingManifest
 from .snapshot import KVCacheSnapshotDescriptor, SnapshotId
-from .types import KVCacheComponent, require_integer, require_nonempty_string
+from .types import (
+    KVCacheComponent,
+    require_integer,
+    require_manifest_items,
+    require_nonempty_string,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,7 @@ class KVCacheTransferEdge:
             require_integer(getattr(self, name), name, minimum=1)
         if not isinstance(self.component, KVCacheComponent):
             raise ValueError("component must be a KVCacheComponent")  # noqa: TRY004
+        require_integer(self.inner_bytes, "inner_bytes", minimum=1)
 
     @property
     def inner_bytes(self) -> int:
@@ -72,9 +78,14 @@ class KVCacheLogicalTransferPlan:
         _validate_placement_compatibility(
             self.source_placement, self.target_placement, self.snapshot
         )
-        if not self.edges or not all(
-            isinstance(edge, KVCacheTransferEdge) for edge in self.edges
-        ):
+        object.__setattr__(
+            self,
+            "edges",
+            require_manifest_items(
+                self.edges, "logical plan edges", KVCacheTransferEdge
+            ),
+        )
+        if not self.edges:
             raise ValueError("logical transfer plan must contain transfer edges")
         if any(
             edge.target_participant_id != self.target_participant_id
@@ -221,6 +232,8 @@ def _build_transfer_edges(
     target: KVCachePlacementPart,
     source_dp_rank: int,
 ) -> tuple[KVCacheTransferEdge, ...]:
+    if len(source_placement.parts) ** 2 * len(target.layer_ids) > 10_000_000:
+        raise ValueError("KV-cache logical planning work limit exceeded")
     descriptor = source_placement.descriptor
     edges: list[KVCacheTransferEdge] = []
     for layer_id in target.layer_ids:
@@ -242,28 +255,20 @@ def _build_transfer_edges(
                     f"source placement misses target layer {layer_id} head {head}"
                 )
             selected = candidates[target.replica_ordinal % len(candidates)]
-            run_end = head + 1
-            while run_end < target_end:
-                next_candidates = sorted(
-                    (
-                        part
-                        for part in source_placement.parts
-                        if part.rank.dp == source_dp_rank
-                        and layer_id in part.layer_ids
-                        and part.head_start
-                        <= run_end
-                        < part.head_start + part.head_count
-                    ),
-                    key=lambda part: (part.replica_ordinal, part.participant_id),
-                )
-                if not next_candidates:
-                    break
-                if (
-                    next_candidates[target.replica_ordinal % len(next_candidates)]
-                    != selected
-                ):
-                    break
-                run_end += 1
+            # Ownership is constant between explicit interval boundaries. Never
+            # iterate across a potentially untrusted total_kv_heads value.
+            run_end = min(
+                [target_end]
+                + [
+                    boundary
+                    for part in source_placement.parts
+                    if part.rank.dp == source_dp_rank and layer_id in part.layer_ids
+                    for boundary in (part.head_start, part.head_start + part.head_count)
+                    if boundary > head
+                ]
+            )
+            if len(edges) + 2 > 100_000:
+                raise ValueError("KV-cache logical plan edge limit exceeded")
             for component, head_dim in (
                 (KVCacheComponent.KEY, descriptor.key_head_dim),
                 (KVCacheComponent.VALUE, descriptor.value_head_dim),
@@ -420,6 +425,11 @@ def prepare_kv_cache_transfer(
         snapshot=logical_plan.snapshot,
     )
 
+    source_snapshot = (source_binding.snapshot_id, source_binding.snapshot_digest)
+    target_snapshot = (target_binding.snapshot_id, target_binding.snapshot_digest)
+    if source_snapshot != target_snapshot:
+        raise ValueError("source and target runtime binding snapshot identities differ")
+
     source_buffers = {
         (item.global_layer_id, item.component): item.fragment
         for item in source_binding.buffers
@@ -463,14 +473,8 @@ def prepare_kv_cache_transfer(
         source_placement_digest=logical_plan.source_placement.digest,
         target_placement_id=logical_plan.target_placement.placement_id,
         target_placement_digest=logical_plan.target_placement.digest,
-        snapshot_id=(
-            logical_plan.snapshot.snapshot_id
-            if logical_plan.snapshot is not None
-            else None
-        ),
-        snapshot_digest=(
-            logical_plan.snapshot.digest if logical_plan.snapshot is not None else None
-        ),
+        snapshot_id=source_binding.snapshot_id,
+        snapshot_digest=source_binding.snapshot_digest,
         page_size=logical_plan.source_placement.descriptor.page_size,
         edges=tuple(prepared_edges),
     )

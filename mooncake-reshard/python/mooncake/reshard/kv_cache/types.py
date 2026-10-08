@@ -74,6 +74,10 @@ class KVCacheDescriptor:
             "value_head_dim",
         ):
             require_integer(getattr(self, name), name, minimum=1)
+        for name in ("key_head_dim", "value_head_dim"):
+            require_integer(
+                getattr(self, name) * self.itemsize, f"{name} byte size", minimum=1
+            )
         if not isinstance(self.layout, KVCacheLayout):
             raise ValueError("layout must be a KVCacheLayout")  # noqa: TRY004
         if self.layout is not KVCacheLayout.NHD:
@@ -141,6 +145,8 @@ def require_integer_tuple(
 ) -> tuple[int, ...]:
     if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
         raise ValueError(f"{name} must contain integers")  # noqa: TRY004
+    if len(cast(Sequence[object], values)) > 100_000:
+        raise ValueError(f"{name} exceeds the KV-cache collection limit")
     items = cast(Sequence[object], values)
     return tuple(
         require_integer(value, f"{name}[{index}]", minimum=minimum)
@@ -153,6 +159,8 @@ def require_manifest_items(
 ) -> tuple[_T, ...]:
     if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
         raise ValueError(f"{name} must be a sequence")  # noqa: TRY004
+    if len(cast(Sequence[object], value)) > 100_000:
+        raise ValueError(f"{name} exceeds the KV-cache collection limit")
     items = tuple(cast(Sequence[object], value))
     if not all(isinstance(item, item_type) for item in items):
         raise ValueError(f"{name} must contain {item_type.__name__}")
