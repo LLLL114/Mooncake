@@ -25,6 +25,19 @@ def request(identifier, planned, submitted, finished, size=100, status="success"
 
 
 class SummarizerChecks(unittest.TestCase):
+    def test_three_second_windows_keep_boundary_and_drain_cohorts(self):
+        manifest={**MANIFEST, "measurement_end_ns": START + 60_000 * MS}
+        rows=[request(i, (i // 500) * 3000 * MS, (i // 500) * 3000 * MS,
+                      (i // 500) * 3000 * MS + (4000 * MS if i % 500 >= 494 else MS))
+              for i in range(10000)]
+        summary, windows=summarize_requests(rows, manifest, 3000)
+        series=windows['latency']['windows']
+        self.assertEqual(len(series),20)
+        self.assertTrue(all(w['duration_ns']==3000*MS and w['success_requests']==500 for w in series))
+        self.assertTrue(all(w['p99_end_to_end_ns']==4000*MS for w in series))
+        self.assertEqual(summary['measurement']['arrival_cohort_unfinished_at_end'],6)
+        self.assertTrue(summary['conservation']['arrival_window_request_balance'])
+
     def test_nearest_rank(self):
         values = list(range(1, 1001))
         for percentile, expected in ((500, 500), (950, 950), (990, 990), (999, 999)):
@@ -112,7 +125,7 @@ class SummarizerChecks(unittest.TestCase):
             manifest.write_text(json.dumps(MANIFEST), encoding="utf-8")
             records.write_text(json.dumps(request(0, 0, 1, 2)) + "\n", encoding="utf-8")
             command = [sys.executable, "-B", str(script), "--requests", str(records),
-                       "--manifest", str(manifest), "--output-dir", str(output)]
+                       "--manifest", str(manifest), "--latency-window-ms", "3000", "--output-dir", str(output)]
             result = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads((output / "summary.json").read_text())["observed"]["requests"], 1)

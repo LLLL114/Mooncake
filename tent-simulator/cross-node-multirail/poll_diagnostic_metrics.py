@@ -24,7 +24,8 @@ def clock_offset(meta):
 
 def load(root):
     root=Path(root); meta=read_json(root/'poll-diagnostic.json')
-    if meta['schema']!='tent-poll-diagnostic-v1' or meta['error'] or meta['completion_bytes']!=128 or meta['gap_bytes']!=64:
+    provider=meta['schema']=='tent-provider-diagnostic-v1'
+    if meta['schema'] not in ('tent-poll-diagnostic-v1','tent-provider-diagnostic-v1') or meta['error'] or meta['completion_bytes']!=128 or meta['gap_bytes']!=64:
         raise ValueError('invalid diagnostic metadata')
     mapping=clock_offset(meta);meta['monotonic_mapping']=mapping
     records=defaultdict(list); gaps=defaultdict(list)
@@ -37,12 +38,14 @@ def load(root):
             r=dict(zip(NAMES,values))
             for key in NAMES[3:14]:
                 if r[key]: r[key]-=mapping['offset_ns']
-            if (r['worker']!=w['worker'] or r['reserved'] or r['bytes']!=65536 or r['offset']%65536
+            invalid_qpn=(not r['reserved']) if provider else bool(r['reserved'])
+            if (r['worker']!=w['worker'] or invalid_qpn or r['bytes']!=65536 or r['offset']%65536
                     or not 0<=r['offset']<1048576 or not 0<r['enqueue']<=r['submit']<=r['poll_end']<=r['handled']
                     or not 0<=r['previous_begin']<=r['previous_end']<=r['poll_begin']<=r['poll_end']
                     or not 0<=r['drained_begin']<=r['drained_end']<=r['previous_end']
                     or not 0<r['loop_begin']<=r['phase_begin']<=r['poll_begin']):
                 raise ValueError('invalid completion time/layout')
+            if provider: r['hardware_qpn']=r['reserved']
             records[r['request']].append(r)
         raw=(root/w['gap_file']).read_bytes()
         if len(raw)!=w['gaps']*GAP.size: raise ValueError('truncated gaps')
@@ -57,7 +60,7 @@ def load(root):
     return meta,records,gaps
 
 
-def audit(root):
+def audit(root, single_rail=False):
     root=Path(root); meta,records,gaps=load(root); m=read_json(root/'manifest.json')
     requests=[json.loads(s) for s in (root/'requests.jsonl').read_text().splitlines()]
     if set(records)!={r['request_id'] for r in requests}: raise ValueError('request coverage differs')
@@ -69,7 +72,14 @@ def audit(root):
         if any(s['enqueue']<request['submitted_ns'] or s['poll_end']>request['finished_ns'] for s in slices):
             raise ValueError('request lifetime correlation differs')
     submitted=sorted(requests,key=lambda r:r['submitted_ns']); times=[r['submitted_ns'] for r in submitted]
-    _,trace=load_trace(root)
+    if single_rail:
+        whitelist=read_json(root/'tent-config.json')['topology']['rdma_whitelist']
+        names=m['environment']['nic_id_to_name']
+        if len(whitelist)!=1 or any(names[str(s['dev'])]!=whitelist[0] for slices in records.values() for s in slices):
+            raise ValueError('single Rail completion NIC differs from configuration')
+        trace=[]
+    else:
+        _,trace=load_trace(root)
     for r in trace:
         q=submitted[bisect.bisect_right(times,r['ns'])-1]
         actual=defaultdict(int)

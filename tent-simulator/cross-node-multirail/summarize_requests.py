@@ -141,7 +141,7 @@ def summarize_requests(records, manifest, latency_window_ms=250):
     """Return (summary, windows) dictionaries; no file writes.
 
     records is an iterable of decoded JSON objects. latency_window_ms must be
-    250, 1000, or 5000, as preselected for the experiment. All records are kept
+    250, 1000, 3000, or 5000, as preselected for the experiment. All records are kept
     in memory for exact quantiles. ValueError indicates invalid input.
     """
     if not isinstance(manifest, dict):
@@ -150,8 +150,8 @@ def summarize_requests(records, manifest, latency_window_ms=250):
     end = _integer(manifest.get("measurement_end_ns"), "measurement_end_ns")
     if end <= start:
         raise ValueError("measurement_end_ns must exceed measurement_start_ns")
-    if type(latency_window_ms) is not int or latency_window_ms not in (250, 1000, 5000):
-        raise ValueError("latency_window_ms must be 250, 1000, or 5000")
+    if type(latency_window_ms) is not int or latency_window_ms not in (250, 1000, 3000, 5000):
+        raise ValueError("latency_window_ms must be 250, 1000, 3000, or 5000")
     all_records, seen = [], set()
     for row_number, record in enumerate(records, 1):
         _validate_record(record, row_number)
@@ -258,7 +258,7 @@ def main(argv=None):
     parser.add_argument("--requests", type=Path, required=True, help="terminal requests JSONL")
     parser.add_argument("--manifest", type=Path, required=True, help="measurement manifest JSON")
     parser.add_argument("--output-dir", type=Path, required=True, help="explicit report directory (outside source tree recommended)")
-    parser.add_argument("--latency-window-ms", type=int, choices=(250, 1000, 5000), default=250)
+    parser.add_argument("--latency-window-ms", type=int, choices=(250, 1000, 3000, 5000), default=250)
     args = parser.parse_args(argv)
     try:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
