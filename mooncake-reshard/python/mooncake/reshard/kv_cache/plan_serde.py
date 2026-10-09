@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from typing import cast
 
 from ..contracts import ParticipantId
+from ._wire import canonical_json, load_json_object
+from ._wire import json_integer as _integer
+from ._wire import json_string as _string
 from .planner import KVCacheLogicalTransferPlan, KVCacheTransferEdge
 from .serde import kv_cache_placement_from_json, kv_cache_placement_to_json
 from .snapshot_serde import kv_cache_snapshot_from_json, kv_cache_snapshot_to_json
@@ -16,7 +18,7 @@ from .types import KVCacheComponent
 def kv_cache_logical_plan_to_json(plan: KVCacheLogicalTransferPlan) -> str:
     if not isinstance(plan, KVCacheLogicalTransferPlan):
         raise ValueError("plan must be a KVCacheLogicalTransferPlan")  # noqa: TRY004
-    return json.dumps(
+    return canonical_json(
         {
             "source_placement_json": kv_cache_placement_to_json(plan.source_placement),
             "target_placement_json": kv_cache_placement_to_json(plan.target_placement),
@@ -31,8 +33,6 @@ def kv_cache_logical_plan_to_json(plan: KVCacheLogicalTransferPlan) -> str:
             "edges": [_edge_to_wire(edge) for edge in plan.edges],
             "expected_writer_ids": list(plan.expected_writer_ids),
         },
-        sort_keys=True,
-        separators=(",", ":"),
     )
 
 
@@ -83,31 +83,7 @@ def kv_cache_logical_plan_from_json(value: str) -> KVCacheLogicalTransferPlan:
 
 
 def _load_json_object(value: str) -> Mapping[str, object]:
-    if type(value) is not str or len(value.encode("utf-8")) > 16 * 1024 * 1024:
-        raise ValueError("KV-cache JSON must be text within the 16 MiB wire limit")
-
-    def reject_constant(constant: str) -> None:
-        raise ValueError(f"non-finite JSON number is unsupported: {constant}")
-
-    def reject_duplicate_fields(
-        pairs: list[tuple[str, object]],
-    ) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, item in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON field: {key}")
-            result[key] = item
-        return result
-
-    try:
-        payload = json.loads(
-            value,
-            parse_constant=reject_constant,
-            object_pairs_hook=reject_duplicate_fields,
-        )
-    except (TypeError, json.JSONDecodeError) as error:
-        raise ValueError("KV-cache logical plan is not valid JSON") from error
-    return _mapping(payload, "KV-cache logical plan")
+    return load_json_object(value, "KV-cache logical plan")
 
 
 def _edge_to_wire(edge: KVCacheTransferEdge) -> dict[str, object]:
@@ -171,22 +147,10 @@ def _sequence(value: object, label: str) -> Sequence[object]:
     return cast(Sequence[object], value)
 
 
-def _string(value: object, label: str) -> str:
-    if type(value) is not str or not value:
-        raise ValueError(f"{label} must be a non-empty string")
-    return value
-
-
 def _optional_string(value: object, label: str) -> str | None:
     if value is None:
         return None
     return _string(value, label)
-
-
-def _integer(value: object, label: str) -> int:
-    if type(value) is not int or value < 0:
-        raise ValueError(f"{label} must be a non-negative integer")
-    return value
 
 
 __all__ = ["kv_cache_logical_plan_from_json", "kv_cache_logical_plan_to_json"]

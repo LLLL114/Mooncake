@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import asdict, dataclass
 
 from ..contracts import ParticipantId, TopologyId
+from ._wire import canonical_digest
 from .types import (
     KVCacheRank,
     require_integer,
@@ -117,8 +116,7 @@ def _topology_id(
         "tp_size": tp_size,
         "participants": [asdict(item) for item in participants],
     }
-    encoded = json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
-    return TopologyId(f"sha256:{hashlib.sha256(encoded).hexdigest()}")
+    return TopologyId(f"sha256:{canonical_digest(content)}")
 
 
 __all__ = ["KVCacheTopology", "KVCacheTopologyParticipant"]

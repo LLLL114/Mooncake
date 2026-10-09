@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TypeAlias, cast
@@ -19,6 +18,9 @@ from ..contracts import (
     RuntimeInstanceId,
     TopologyId,
 )
+from ._wire import canonical_json, load_json_object
+from ._wire import json_integer as _integer
+from ._wire import json_string as _string
 from .part import KVCachePlacementPart
 from .placement import KVCachePlacementManifest
 from .runtime import KVCacheBufferBinding, KVCacheRuntimeBindingManifest
@@ -414,35 +416,11 @@ def _require_resource_kind(payload: JsonObject) -> None:
 
 
 def _dump(value: JsonValue) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return canonical_json(value)
 
 
 def _load_json_object(value: str, label: str) -> JsonObject:
-    if type(value) is not str or len(value.encode("utf-8")) > 16 * 1024 * 1024:
-        raise ValueError("KV-cache JSON must be text within the 16 MiB wire limit")
-
-    def reject_constant(constant: str) -> None:
-        raise ValueError(f"non-finite JSON number is unsupported: {constant}")
-
-    def reject_duplicate_fields(
-        pairs: list[tuple[str, object]],
-    ) -> dict[str, JsonValue]:
-        result: dict[str, JsonValue] = {}
-        for key, item in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON field: {key}")
-            result[key] = cast(JsonValue, item)
-        return result
-
-    try:
-        raw = json.loads(
-            value,
-            parse_constant=reject_constant,
-            object_pairs_hook=reject_duplicate_fields,
-        )
-    except (TypeError, json.JSONDecodeError) as error:
-        raise ValueError(f"{label} is not valid JSON") from error
-    return _mapping(cast(object, raw), label)
+    return _mapping(load_json_object(value, label), label)
 
 
 def _mapping(value: object, label: str) -> JsonObject:
@@ -469,12 +447,6 @@ def _sequence(value: object, label: str) -> Sequence[JsonValue]:
     return cast(Sequence[JsonValue], value)
 
 
-def _string(value: object, label: str) -> str:
-    if type(value) is not str or not value:
-        raise ValueError(f"{label} must be a non-empty string")
-    return value
-
-
 def _optional_snapshot_id(value: object) -> SnapshotId | None:
     parsed = _optional_string(value, "snapshot_id")
     return SnapshotId(parsed) if parsed is not None else None
@@ -484,12 +456,6 @@ def _optional_string(value: object, label: str) -> str | None:
     if value is None:
         return None
     return _string(value, label)
-
-
-def _integer(value: object, label: str, *, minimum: int = 0) -> int:
-    if type(value) is not int or value < minimum:
-        raise ValueError(f"{label} must be an integer at least {minimum}")
-    return value
 
 
 def _integer_tuple(value: object, label: str, *, minimum: int = 0) -> tuple[int, ...]:

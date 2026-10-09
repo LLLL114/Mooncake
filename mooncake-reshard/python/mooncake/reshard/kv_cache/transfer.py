@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from ._range_ops import index_runtime_ranges, plan_range_copy
 from .planner import KVCacheLogicalTransferPlan, _build_transfer_edges
 from .resolved import (
     KVCacheResolvedRuntimeBinding,
@@ -188,8 +189,18 @@ def _lower(
     target_bindings: tuple[KVCacheResolvedRuntimeBinding, ...],
     limits: KVCacheTransferLimits,
 ) -> tuple[KVCacheWrite, ...]:
-    sources = {b.participant_id: b for b in source_bindings}
-    targets = {b.participant_id: b for b in target_bindings}
+    source_ranges = {
+        b.participant_id: index_runtime_ranges(b.ranges) for b in source_bindings
+    }
+    target_ranges = {
+        b.participant_id: index_runtime_ranges(b.ranges) for b in target_bindings
+    }
+    source_regions = {
+        b.participant_id: {r.region_id: r for r in b.regions} for b in source_bindings
+    }
+    target_regions = {
+        b.participant_id: {r.region_id: r for r in b.regions} for b in target_bindings
+    }
     writes: list[KVCacheWrite] = []
     total_bytes = 0
     work = 0
@@ -246,64 +257,38 @@ def _lower(
 
     for plan in plans:
         for edge in plan.edges:
-            sb, tb = (
-                sources[edge.source_participant_id],
-                targets[edge.target_participant_id],
-            )
-            sr = {r.region_id: r for r in sb.regions}
-            tr = {r.region_id: r for r in tb.regions}
-            ss = [
-                r
-                for r in sb.ranges
-                if (r.global_layer_id, r.component)
-                == (edge.global_layer_id, edge.component)
-            ]
-            ts = [
-                r
-                for r in tb.ranges
-                if (r.global_layer_id, r.component)
-                == (edge.global_layer_id, edge.component)
-            ]
+            sr = source_regions[edge.source_participant_id]
+            tr = target_regions[edge.target_participant_id]
+            key = (edge.global_layer_id, edge.component)
+            ss = source_ranges[edge.source_participant_id].get(key, [])
+            ts = target_ranges[edge.target_participant_id].get(key, [])
             work += len(ss) * len(ts)
             if work > limits.max_validation_work:
                 raise ValueError("runtime lowering work limit exceeded")
-            for s in ss:
-                for t in ts:
-                    lo = max(s.token_start, t.token_start)
-                    hi = min(s.token_end, t.token_end)
-                    hs = max(s.head_start, t.head_start, edge.global_head_start)
-                    he = min(
-                        s.head_end, t.head_end, edge.global_head_start + edge.head_count
+            for source in ss:
+                for target in ts:
+                    copy = plan_range_copy(
+                        source,
+                        target,
+                        edge.head_dim * edge.itemsize,
+                        head_window=(
+                            edge.global_head_start,
+                            edge.global_head_start + edge.head_count,
+                        ),
                     )
-                    if hi <= lo or he <= hs:
+                    if copy is None:
                         continue
-                    width = edge.head_dim * edge.itemsize
-                    contiguous_heads = (
-                        s.head_stride_bytes == t.head_stride_bytes == width
-                    )
-                    if contiguous_heads:
-                        width *= he - hs
-                    contiguous_rows = (
-                        contiguous_heads
-                        and s.token_stride_bytes == t.token_stride_bytes == width
-                    )
-                    count = (
-                        1
-                        if contiguous_rows
-                        else (hi - lo) * (1 if contiguous_heads else he - hs)
-                    )
-                    work += count
+                    work += copy.segment_count
                     if work > limits.max_validation_work:
                         raise ValueError("runtime lowering expansion limit exceeded")
-                    for token in range(lo, lo + 1 if contiguous_rows else hi):
-                        for head in range(hs, hs + 1 if contiguous_heads else he):
-                            append(
-                                edge.source_participant_id,
-                                edge.target_participant_id,
-                                tr[t.region_id].endpoint,
-                                s.address(sr[s.region_id], token, head),
-                                t.address(tr[t.region_id], token, head),
-                                width * (hi - lo) if contiguous_rows else width,
-                                (s.region_id, t.region_id),
-                            )
+                    for source_offset, target_offset, nbytes in copy.segments():
+                        append(
+                            edge.source_participant_id,
+                            edge.target_participant_id,
+                            tr[target.region_id].endpoint,
+                            sr[source.region_id].address + source_offset,
+                            tr[target.region_id].address + target_offset,
+                            nbytes,
+                            (source.region_id, target.region_id),
+                        )
     return tuple(writes)

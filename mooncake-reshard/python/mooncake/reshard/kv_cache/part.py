@@ -11,6 +11,7 @@ from ..contracts import (
     RevisionId,
     TopologyId,
 )
+from ._logical_layout import KVCacheLogicalShard
 from .types import (
     KVCacheDescriptor,
     KVCacheRank,
@@ -66,6 +67,17 @@ class KVCachePlacementPart:
             raise ValueError("head interval exceeds total_kv_heads")
         if self.replica_ordinal >= self.replica_count:
             raise ValueError("replica_ordinal must be smaller than replica_count")
+
+    @property
+    def logical_shard(self) -> KVCacheLogicalShard:
+        """Project geometry and replicas without runtime participant identity."""
+        return KVCacheLogicalShard(
+            self.layer_ids,
+            self.head_start,
+            self.head_count,
+            self.replica_ordinal,
+            self.replica_count,
+        )
 
 
 __all__ = ["KVCachePlacementPart"]

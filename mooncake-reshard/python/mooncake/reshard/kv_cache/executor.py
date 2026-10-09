@@ -6,6 +6,7 @@ import threading
 from collections.abc import Iterator
 from typing import Protocol
 
+from ._batching import iter_batches
 from .completion import KVCacheWriterReceipt
 from .resolved import KVCacheRegisteredRegion, KVCacheResolvedRuntimeBinding
 from .transfer import KVCacheRuntimeTransferPlan, KVCacheWrite
@@ -197,17 +198,10 @@ class KVCacheTransferEngineExecutor:
 def _batches(
     writes: list[KVCacheWrite], max_count: int, max_bytes: int
 ) -> Iterator[list[KVCacheWrite]]:
-    batch: list[KVCacheWrite] = []
-    size = 0
-    for write in writes:
-        if batch and (
-            write.endpoint != batch[0].endpoint
-            or len(batch) == max_count
-            or size + write.nbytes > max_bytes
-        ):
-            yield batch
-            batch, size = [], 0
-        batch.append(write)
-        size += write.nbytes
-    if batch:
-        yield batch
+    yield from iter_batches(
+        writes,
+        cost=lambda write: (1, write.nbytes),
+        partition=lambda write: write.endpoint,
+        max_operations=max_count,
+        max_bytes=max_bytes,
+    )

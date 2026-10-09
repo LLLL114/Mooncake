@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -14,6 +12,7 @@ from ..contracts import (
     PlacementFragmentId,
     RuntimeBindingFragment,
 )
+from ._wire import canonical_digest
 
 _MAX_U64 = (1 << 64) - 1
 _T = TypeVar("_T")
@@ -108,8 +107,7 @@ def placement_fragment_id(
         "head_start": head_start,
         "head_count": head_count,
     }
-    encoded = json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
-    return PlacementFragmentId(f"sha256:{hashlib.sha256(encoded).hexdigest()}")
+    return PlacementFragmentId(f"sha256:{canonical_digest(content)}")
 
 
 def canonical_strides_bytes(shape: tuple[int, ...], itemsize: int) -> tuple[int, ...]:

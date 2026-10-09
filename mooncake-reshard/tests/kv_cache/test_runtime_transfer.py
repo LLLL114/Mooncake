@@ -223,18 +223,26 @@ def execute_all(plan, *, engine_factory=MemoryEngine):
 
 
 @pytest.mark.parametrize(
-    "source_pp,target_pp,source_tp,target_tp,heads,source_dp,target_dp",
+    "source_pp,target_pp,source_tp,target_tp,heads,source_dp,target_dp,reverse,padding",
     [
-        (((0, 1),), ((0, 1),), 1, 2, 4, 1, 1),
-        (((0, 1),), ((0, 1),), 2, 1, 4, 1, 1),
-        (((0,), (1,)), ((1,), (0,)), 2, 1, 4, 1, 1),
-        (((0, 1),), ((0,), (1,)), 1, 2, 4, 2, 3),
-        (((0,),), ((0,),), 4, 1, 2, 1, 1),
-        (((0,),), ((0,),), 4, 2, 1, 1, 1),
+        (((0, 1),), ((0, 1),), 1, 2, 4, 1, 1, False, 0),
+        (((0, 1),), ((0, 1),), 2, 1, 4, 1, 1, True, 4),
+        (((0,), (1,)), ((1,), (0,)), 2, 1, 4, 1, 1, True, 4),
+        (((0, 1),), ((0,), (1,)), 1, 2, 4, 2, 3, True, 4),
+        (((0,),), ((0,),), 4, 1, 2, 1, 1, False, 0),
+        (((0,),), ((0,),), 4, 2, 1, 1, 1, True, 4),
     ],
 )
 def test_content_topologies_and_completion(
-    source_pp, target_pp, source_tp, target_tp, heads, source_dp, target_dp
+    source_pp,
+    target_pp,
+    source_tp,
+    target_tp,
+    heads,
+    source_dp,
+    target_dp,
+    reverse,
+    padding,
 ):
     source = _placement(
         "source", source_pp, source_tp, total_kv_heads=heads, dp_size=source_dp
@@ -246,6 +254,8 @@ def test_content_topologies_and_completion(
         source,
         target,
         limits=KVCacheTransferLimits(max_batch_operations=3, max_batch_bytes=48),
+        reverse=reverse,
+        padding=padding,
     )
     restored = kv_cache_runtime_transfer_from_json(
         kv_cache_runtime_transfer_to_json(plan)
@@ -275,9 +285,17 @@ def test_content_topologies_and_completion(
         assert executor.execute(plan, binding.participant_id)
         assert len(engine.calls) == before
         assert len(engine.probes) == len(set(engine.probes))
-        for _, sources, _, lengths in engine.calls:
+        for endpoint, sources, targets, lengths in engine.calls:
             assert len(sources) <= 3
             assert sum(lengths) <= 48
+            for address, size in zip(targets, lengths):
+                assert any(
+                    region.endpoint == endpoint
+                    and region.address <= address
+                    and address + size <= region.address + region.nbytes
+                    for target_binding in plan.target_bindings
+                    for region in target_binding.regions
+                )
 
 
 @pytest.fixture

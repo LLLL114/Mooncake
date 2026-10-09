@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, fields
 from typing import Any, TypeVar, cast
 
+from ._wire import canonical_json
 from .completion import KVCacheTargetReceipt, KVCacheWriterReceipt
 from .plan_serde import kv_cache_logical_plan_from_json, kv_cache_logical_plan_to_json
 from .resolved import (
@@ -42,12 +42,14 @@ def _construct(cls: type[_T], value: object) -> _T:
 
 
 def _dump(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return canonical_json(value, allow_nan=False)
 
 
 def kv_cache_resolved_binding_to_json(binding: KVCacheResolvedRuntimeBinding) -> str:
     if not isinstance(binding, KVCacheResolvedRuntimeBinding):
         raise TypeError("binding must be a KVCacheResolvedRuntimeBinding")
+    if binding.snapshot_id is None:
+        raise ValueError("R2R serialization requires snapshot identity")
     return _dump(
         {
             "schema": "kv-cache-resolved-binding",
@@ -83,6 +85,8 @@ def kv_cache_resolved_binding_from_json(value: str) -> KVCacheResolvedRuntimeBin
     result = KVCacheResolvedRuntimeBinding(
         **cast(Any, data), regions=regions, ranges=ranges
     )
+    if result.snapshot_id is None:
+        raise ValueError("R2R serialization requires snapshot identity")
     if result.digest != _string(payload["digest"], "digest"):
         raise ValueError("resolved binding digest differs")
     return result

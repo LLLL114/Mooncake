@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import NewType
 
 from ..contracts import ResourceId, ResourceKind
+from ._wire import canonical_digest as _canonical_digest
 from .types import require_integer, require_nonempty_string, require_sha256
 
 SnapshotId = NewType("SnapshotId", str)
@@ -128,11 +127,6 @@ def _snapshot_content(
         "token_fingerprint": token_fingerprint,
         "semantic_fingerprint": semantic_fingerprint,
     }
-
-
-def _canonical_digest(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 __all__ = ["KVCacheSnapshotDescriptor", "SnapshotId"]

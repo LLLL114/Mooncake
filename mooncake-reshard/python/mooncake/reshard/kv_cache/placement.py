@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 
@@ -15,6 +13,8 @@ from ..contracts import (
     ResourceKind,
     RevisionId,
 )
+from ._logical_layout import validate_logical_coverage
+from ._wire import canonical_digest as _canonical_json_digest
 from .part import KVCachePlacementPart
 from .topology import KVCacheTopology, KVCacheTopologyParticipant
 from .types import (
@@ -215,45 +215,11 @@ def _validate_logical_coverage(
         raise ValueError("KV-cache placement validation work limit exceeded")
     selected_dp_ranks = sorted({item.rank.dp for item in topology.participants})
     for dp_rank in selected_dp_ranks:
-        dp_parts = tuple(part for part in parts if part.rank.dp == dp_rank)
-        for layer_id in descriptor.global_layer_ids:
-            boundaries = sorted(
-                {0, descriptor.total_kv_heads}
-                | {
-                    boundary
-                    for part in dp_parts
-                    if layer_id in part.layer_ids
-                    for boundary in (part.head_start, part.head_start + part.head_count)
-                }
-            )
-            for head in boundaries[:-1]:
-                owners = [
-                    part
-                    for part in dp_parts
-                    if layer_id in part.layer_ids
-                    and part.head_start <= head < part.head_start + part.head_count
-                ]
-                if not owners:
-                    raise ValueError(
-                        "KV-cache placement misses "
-                        f"dp={dp_rank} layer={layer_id} head={head}"
-                    )
-                if len(owners) > 1:
-                    if (
-                        len({(part.head_start, part.head_count) for part in owners})
-                        != 1
-                    ):
-                        raise ValueError(
-                            "overlapping replica head intervals must match exactly"
-                        )
-                    ordinals = {part.replica_ordinal for part in owners}
-                    counts = {part.replica_count for part in owners}
-                    if counts != {len(owners)} or ordinals != set(range(len(owners))):
-                        raise ValueError(
-                            "overlapping KV heads must be an exact declared replica set"
-                        )
-                elif owners[0].replica_count != 1:
-                    raise ValueError("incomplete declared KV-head replica set")
+        validate_logical_coverage(
+            descriptor,
+            tuple(part.logical_shard for part in parts if part.rank.dp == dp_rank),
+            label=f"KV-cache placement dp={dp_rank}",
+        )
 
 
 def _placement_content(
@@ -297,11 +263,6 @@ def _placement_content(
             for part in parts
         ],
     }
-
-
-def _canonical_json_digest(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _logical_placement_id(

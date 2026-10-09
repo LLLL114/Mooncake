@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from math import prod
 
 import pytest
@@ -46,7 +46,6 @@ from mooncake.reshard.kv_cache import (
     validate_runtime_binding,
     validate_runtime_bindings,
 )
-
 
 _MAX_U64 = (1 << 64) - 1
 
@@ -280,6 +279,8 @@ def test_placement_part_and_binding_round_trip_are_canonical() -> None:
     assert restored_part == placement.parts[0]
     assert restored_binding == binding
     part_payload = json.loads(kv_cache_part_to_json(placement.parts[0]))
+    assert "logical_shard" not in asdict(placement.parts[0])
+    assert "logical_shard" not in part_payload
     assert "placement_id" not in part_payload
     assert "instance_id" not in part_payload
     assert "address" not in json.dumps(part_payload)
@@ -296,18 +297,18 @@ def test_placement_part_and_binding_round_trip_are_canonical() -> None:
     ],
 )
 def test_transfer_edge_byte_size_boundary(heads, dim, itemsize, accepted):
-    args = dict(
-        source_participant_id="s",
-        target_participant_id="t",
-        global_layer_id=0,
-        component=KVCacheComponent.KEY,
-        global_head_start=0,
-        head_count=heads,
-        source_head_offset=0,
-        target_head_offset=0,
-        head_dim=dim,
-        itemsize=itemsize,
-    )
+    args = {
+        "source_participant_id": "s",
+        "target_participant_id": "t",
+        "global_layer_id": 0,
+        "component": KVCacheComponent.KEY,
+        "global_head_start": 0,
+        "head_count": heads,
+        "source_head_offset": 0,
+        "target_head_offset": 0,
+        "head_dim": dim,
+        "itemsize": itemsize,
+    }
     if accepted:
         assert KVCacheTransferEdge(**args).inner_bytes == heads * dim * itemsize
     else:
@@ -369,11 +370,13 @@ def test_huge_head_count_plans_by_intervals():
         source, target, target.parts[0].participant_id
     )
     assert len(plan.edges) == 2
+    assert {(e.global_head_start, e.head_count) for e in plan.edges} == {(0, 1 << 39)}
 
 
 def test_gqa_replica_ordinal_selects_one_source_writer() -> None:
     source = _placement("source", ((0,),), 4, total_kv_heads=2)
     target = _placement("target", ((0,),), 4, total_kv_heads=2)
+    source = replace(source, parts=tuple(reversed(source.parts)))
     plan = _plan(source, target, "target-p0-t3")
 
     assert plan.source_participant_ids == (ParticipantId("source-p0-t3"),)
@@ -459,13 +462,14 @@ def test_arbitrary_dp_pp_tp_topologies_select_one_source_replica() -> None:
         )
 
 
-def test_role_agnostic_placement_assembly_supports_multiple_dp_replicas() -> None:
-    placement = _placement("server-a", ((0,), (1,)), 2, dp_size=3)
+@pytest.mark.parametrize("layers,tp", [(((0,), (1,)), 2), (((), (0, 1)), 8)])
+def test_role_agnostic_placement_assembly_supports_multiple_dp_replicas(layers, tp):
+    placement = _placement("server-a", layers, tp, dp_size=3)
     assembled = assemble_kv_cache_placement(
         placement.parts,
         dp_size=3,
         pp_size=2,
-        tp_size=2,
+        tp_size=tp,
     )
     assert assembled == placement
     assert assembled.dp_ranks == (0, 1, 2)
@@ -474,25 +478,18 @@ def test_role_agnostic_placement_assembly_supports_multiple_dp_replicas() -> Non
 def test_complete_placement_rejects_missing_participant_and_coverage() -> None:
     complete = _placement("source", ((0,),), 2)
     with pytest.raises(ValueError, match="missing topology participant"):
-        KVCachePlacementManifest(
-            resource_id=complete.resource_id,
-            revision=complete.revision,
-            placement_set_id=complete.placement_set_id,
-            topology=complete.topology,
-            descriptor=complete.descriptor,
-            parts=complete.parts[:1],
-        )
+        replace(complete, parts=complete.parts[:1])
 
-    malformed = replace(complete.parts[1], head_start=1, head_count=1)
-    with pytest.raises(ValueError, match="overlapping|misses"):
-        KVCachePlacementManifest(
-            resource_id=complete.resource_id,
-            revision=complete.revision,
-            placement_set_id=complete.placement_set_id,
-            topology=complete.topology,
-            descriptor=complete.descriptor,
-            parts=(complete.parts[0], malformed),
-        )
+    for start, count in ((3, 1), (1, 2), (0, 2)):
+        malformed = replace(complete.parts[1], head_start=start, head_count=count)
+        with pytest.raises(ValueError):
+            replace(complete, parts=(complete.parts[0], malformed))
+
+    replicas = _placement("source", ((0,),), 8)
+    for change in ({"replica_ordinal": 0}, {"replica_count": 3}):
+        malformed = replace(replicas.parts[1], **change)
+        with pytest.raises(ValueError):
+            replace(replicas, parts=(replicas.parts[0], malformed, *replicas.parts[2:]))
 
 
 def test_binding_requires_exact_participant_membership_and_global_digest() -> None:

@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
-from typing import cast
 
 from ..contracts import ResourceId, ResourceKind
+from ._wire import canonical_json, load_json_object
+from ._wire import json_integer as _integer
+from ._wire import json_string as _string
 from .snapshot import KVCacheSnapshotDescriptor, SnapshotId
 
 
 def kv_cache_snapshot_to_json(snapshot: KVCacheSnapshotDescriptor) -> str:
     if not isinstance(snapshot, KVCacheSnapshotDescriptor):
         raise ValueError("snapshot must be a KVCacheSnapshotDescriptor")  # noqa: TRY004
-    return json.dumps(
+    return canonical_json(
         {
             "resource_kind": snapshot.resource_kind.value,
             "namespace": snapshot.namespace,
@@ -27,8 +28,6 @@ def kv_cache_snapshot_to_json(snapshot: KVCacheSnapshotDescriptor) -> str:
             "token_fingerprint": snapshot.token_fingerprint,
             "semantic_fingerprint": snapshot.semantic_fingerprint,
         },
-        sort_keys=True,
-        separators=(",", ":"),
     )
 
 
@@ -73,45 +72,7 @@ def kv_cache_snapshot_from_json(value: str) -> KVCacheSnapshotDescriptor:
 
 
 def _load_json_object(value: str) -> Mapping[str, object]:
-    if type(value) is not str or len(value.encode("utf-8")) > 16 * 1024 * 1024:
-        raise ValueError("KV-cache JSON must be text within the 16 MiB wire limit")
-
-    def reject_constant(constant: str) -> None:
-        raise ValueError(f"non-finite JSON number is unsupported: {constant}")
-
-    def reject_duplicate_fields(
-        pairs: list[tuple[str, object]],
-    ) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, item in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON field: {key}")
-            result[key] = item
-        return result
-
-    try:
-        payload = json.loads(
-            value,
-            parse_constant=reject_constant,
-            object_pairs_hook=reject_duplicate_fields,
-        )
-    except (TypeError, json.JSONDecodeError) as error:
-        raise ValueError("KV-cache snapshot is not valid JSON") from error
-    if not isinstance(payload, Mapping):
-        raise ValueError("KV-cache snapshot must be an object")  # noqa: TRY004
-    return cast(Mapping[str, object], payload)
-
-
-def _string(value: object, label: str) -> str:
-    if type(value) is not str or not value:
-        raise ValueError(f"{label} must be a non-empty string")
-    return value
-
-
-def _integer(value: object, label: str, *, minimum: int = 0) -> int:
-    if type(value) is not int or value < minimum:
-        raise ValueError(f"{label} must be an integer of at least {minimum}")
-    return value
+    return load_json_object(value, "KV-cache snapshot")
 
 
 __all__ = ["kv_cache_snapshot_from_json", "kv_cache_snapshot_to_json"]

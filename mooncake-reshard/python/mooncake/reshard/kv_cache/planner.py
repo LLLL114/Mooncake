@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 
 from ..contracts import ParticipantId, PlacementId
+from ._head_index import HeadIntervalIndex
+from ._wire import canonical_digest as _canonical_json_digest
 from .binding import validate_runtime_binding
 from .part import KVCachePlacementPart
 from .placement import KVCachePlacementManifest
@@ -236,37 +236,21 @@ def _build_transfer_edges(
         raise ValueError("KV-cache logical planning work limit exceeded")
     descriptor = source_placement.descriptor
     edges: list[KVCacheTransferEdge] = []
+    by_layer: dict[int, list[KVCachePlacementPart]] = {}
+    for part in sorted(
+        source_placement.parts, key=lambda p: (p.replica_ordinal, p.participant_id)
+    ):
+        if part.rank.dp == source_dp_rank:
+            for layer in part.layer_ids:
+                by_layer.setdefault(layer, []).append(part)
     for layer_id in target.layer_ids:
-        head = target.head_start
         target_end = target.head_start + target.head_count
-        while head < target_end:
-            candidates = sorted(
-                (
-                    part
-                    for part in source_placement.parts
-                    if part.rank.dp == source_dp_rank
-                    and layer_id in part.layer_ids
-                    and part.head_start <= head < part.head_start + part.head_count
-                ),
-                key=lambda part: (part.replica_ordinal, part.participant_id),
-            )
-            if not candidates:
-                raise ValueError(
-                    f"source placement misses target layer {layer_id} head {head}"
-                )
+        index = HeadIntervalIndex(
+            (part.head_start, part.head_start + part.head_count, part)
+            for part in by_layer.get(layer_id, ())
+        )
+        for head, run_end, candidates in index.cover(target.head_start, target_end):
             selected = candidates[target.replica_ordinal % len(candidates)]
-            # Ownership is constant between explicit interval boundaries. Never
-            # iterate across a potentially untrusted total_kv_heads value.
-            run_end = min(
-                [target_end]
-                + [
-                    boundary
-                    for part in source_placement.parts
-                    if part.rank.dp == source_dp_rank and layer_id in part.layer_ids
-                    for boundary in (part.head_start, part.head_start + part.head_count)
-                    if boundary > head
-                ]
-            )
             if len(edges) + 2 > 100_000:
                 raise ValueError("KV-cache logical plan edge limit exceeded")
             for component, head_dim in (
@@ -287,7 +271,6 @@ def _build_transfer_edges(
                         itemsize=descriptor.itemsize,
                     )
                 )
-            head = run_end
     return tuple(edges)
 
 
@@ -340,11 +323,6 @@ def _logical_plan_content(plan: KVCacheLogicalTransferPlan) -> dict[str, object]
         ],
         "expected_writer_ids": list(plan.expected_writer_ids),
     }
-
-
-def _canonical_json_digest(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _resolve_source_dp_rank(
