@@ -71,6 +71,16 @@ class QueryResult {
  */
 class Client {
    public:
+    auto StartParts(const std::vector<PartPutRequest>& requests) {
+        return master_client_.BatchPutPartStart(requests);
+    }
+    auto EndParts(const std::vector<PartEndRequest>& requests) {
+        return master_client_.BatchPutPartEnd(requests);
+    }
+    auto QueryParts(const std::vector<std::string>& keys) {
+        return master_client_.BatchQueryParts(keys);
+    }
+
     virtual ~Client();
 
     using WriteBufferStager =

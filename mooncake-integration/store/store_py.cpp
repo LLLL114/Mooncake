@@ -503,6 +503,18 @@ class RangedReadSnapshotPy {
         snapshot_ = store_->prepare_get_into_ranges_snapshot(keys_);
     }
 
+    RangedReadSnapshotPy(std::shared_ptr<RealClient> store,
+                         std::vector<std::string> keys,
+                         std::vector<std::string> manifests,
+                         std::vector<uint32_t> counts)
+        : store_(store),
+          keys_(std::move(keys)),
+          manifests_(std::move(manifests)),
+          counts_(std::move(counts)),
+          multipart_(true) {
+        snapshot_ = store->prepare_parts_snapshot(keys_, manifests_, counts_);
+    }
+
     bool belongs_to(const std::shared_ptr<PyClient> &store) const {
         return store_.get() == store.get();
     }
@@ -512,10 +524,24 @@ class RangedReadSnapshotPy {
         const std::vector<std::vector<std::string>> &all_keys,
         const std::vector<std::vector<std::vector<size_t>>> &all_dst_offsets,
         const std::vector<std::vector<std::vector<size_t>>> &all_src_offsets,
-        const std::vector<std::vector<std::vector<size_t>>> &all_sizes) {
+        const std::vector<std::vector<std::vector<size_t>>> &all_sizes,
+        bool allow_staging = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (snapshot_.should_refresh()) {
-            store_->refresh_get_into_ranges_snapshot(snapshot_, keys_);
+            if (multipart_) {
+                snapshot_ =
+                    static_cast<RealClient *>(store_.get())
+                        ->prepare_parts_snapshot(keys_, manifests_, counts_);
+            } else {
+                store_->refresh_get_into_ranges_snapshot(snapshot_, keys_);
+            }
+        }
+        if (allow_staging) {
+            if (auto *real = dynamic_cast<RealClient *>(store_.get())) {
+                return real->get_into_ranges_from_snapshot(
+                    buffers, all_keys, all_dst_offsets, all_src_offsets,
+                    all_sizes, snapshot_.query_result_cache, allow_staging);
+            }
         }
         return store_->get_into_ranges_from_snapshot(
             buffers, all_keys, all_dst_offsets, all_src_offsets, all_sizes,
@@ -526,8 +552,13 @@ class RangedReadSnapshotPy {
     std::shared_ptr<PyClient> store_;
     std::vector<std::string> keys_;
     PyClient::RangedReadSnapshot snapshot_;
+    std::vector<std::string> manifests_;
+    std::vector<uint32_t> counts_;
+    bool multipart_{false};
     std::mutex mutex_;
 };
+
+#include "store_py_range_template.h"
 
 // Python-specific wrapper functions that handle GIL and return pybind11 types
 class MooncakeStorePyWrapper {
@@ -2114,6 +2145,11 @@ PYBIND11_MODULE(store, m) {
     m.def("_deserialize_tensor", &deserialize_tensor_from_bytes,
           "Deserialize Mooncake tensor metadata plus payload bytes.");
 
+    py::class_<RangedReadTemplatePy, std::shared_ptr<RangedReadTemplatePy>>(
+        m, "RangedReadTemplate", "Immutable address-free ranged-read geometry")
+        .def_property_readonly(
+            "range_count",
+            [](const RangedReadTemplatePy &plan) { return plan.sizes.size(); });
     py::class_<RangedReadSnapshotPy, std::shared_ptr<RangedReadSnapshotPy>>(
         m, "RangedReadSnapshot",
         "Reusable metadata snapshot for repeated ranged reads");
@@ -2916,6 +2952,21 @@ PYBIND11_MODULE(store, m) {
             py::arg("buffer_ptr"), py::arg("size"),
             "Register a memory buffer for direct access operations")
         .def(
+            "register_buffer_for_remote_access",
+            [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr,
+               size_t size) {
+                if (!self.real_client_ || self.use_dummy_client_)
+                    throw std::runtime_error(
+                        "Remote registration requires RealClient");
+                py::gil_scoped_release release;
+                return self.real_client_->register_buffer_for_remote_access(
+                    reinterpret_cast<void *>(buffer_ptr), size);
+            },
+            py::arg("buffer_ptr"), py::arg("size"),
+            "Register a host buffer for remote reads/writes before starting "
+            "IO. "
+            "Use unregister_buffer to release it.")
+        .def(
             "unregister_buffer",
             [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr) {
                 // Unregister memory buffer
@@ -2962,6 +3013,93 @@ PYBIND11_MODULE(store, m) {
             py::arg("all_sizes"),
             "Get multiple byte ranges from multiple objects into multiple "
             "pre-allocated buffers")
+        .def(
+            "prepare_get_into_ranges_template",
+            [](MooncakeStorePyWrapper &, std::vector<size_t> destinations,
+               std::vector<size_t> sources, std::vector<size_t> sizes) {
+                py::gil_scoped_release release;
+                return std::make_shared<RangedReadTemplatePy>(
+                    std::move(destinations), std::move(sources),
+                    std::move(sizes));
+            },
+            py::arg("destinations"), py::arg("sources"), py::arg("sizes"),
+            "Compile immutable byte geometry without retaining keys or "
+            "addresses")
+        .def(
+            "get_into_ranges_from_template",
+            [](MooncakeStorePyWrapper &self,
+               const std::shared_ptr<RangedReadSnapshotPy> &snapshot,
+               const std::vector<std::shared_ptr<RangedReadTemplatePy>>
+                   &templates,
+               const std::vector<uintptr_t> &buffer_ptrs,
+               const std::vector<size_t> &buffer_indices,
+               const std::vector<std::string> &keys,
+               const std::vector<size_t> &translations, bool allow_staging) {
+                if (!self.is_client_initialized())
+                    throw std::runtime_error("Client is not initialized");
+                if (!snapshot || !snapshot->belongs_to(self.store_))
+                    throw std::invalid_argument(
+                        "Ranged-read snapshot belongs to another Store");
+                py::gil_scoped_release release;
+                return read_range_templates(*snapshot, templates, buffer_ptrs,
+                                            buffer_indices, keys, translations,
+                                            allow_staging);
+            },
+            py::arg("snapshot"), py::arg("templates"), py::arg("buffer_ptrs"),
+            py::arg("buffer_indices"), py::arg("keys"), py::arg("translations"),
+            py::arg("allow_staging") = false,
+            "Read translated templates synchronously, returning exact "
+            "completion per object. Staging requires explicit opt-in.")
+        .def_property_readonly(
+            "supports_ranged_read_staging",
+            [](const MooncakeStorePyWrapper &self) {
+                return self.is_client_initialized() && !self.use_dummy_client_;
+            },
+            "Whether template reads support per-call staging opt-in")
+        .def(
+            "batch_put_parts_from",
+            [](MooncakeStorePyWrapper &self,
+               const std::vector<std::string> &keys, uint32_t part_index,
+               uint32_t part_count, const std::string &manifest_key,
+               const std::vector<std::vector<uintptr_t>> &pointers,
+               const std::vector<std::vector<size_t>> &sizes) {
+                if (!self.is_client_initialized() || self.use_dummy_client_)
+                    throw std::runtime_error(
+                        "Multipart requires initialized RealClient");
+                auto buffers = CastAddrs2Ptrs(pointers);
+                py::gil_scoped_release release;
+                return self.real_client_->batch_put_parts_from(
+                    keys, part_index, part_count, manifest_key, buffers, sizes);
+            },
+            py::arg("keys"), py::arg("part_index"), py::arg("part_count"),
+            py::arg("manifest_key"), py::arg("pointers"), py::arg("sizes"))
+        .def("batch_query_parts",
+             [](MooncakeStorePyWrapper &self,
+                const std::vector<std::string> &keys) {
+                 if (!self.is_client_initialized() || self.use_dummy_client_)
+                     throw std::runtime_error(
+                         "Multipart requires initialized RealClient");
+                 py::gil_scoped_release release;
+                 auto responses = self.real_client_->query_parts(keys);
+                 std::vector<std::tuple<int, std::string, uint32_t>> result;
+                 for (const auto &row : responses)
+                     result.emplace_back(row ? 0 : toInt(row.error()),
+                                         row ? row->manifest_key : "",
+                                         row ? row->parts.size() : 0);
+                 return result;
+             })
+        .def("prepare_get_parts_snapshot",
+             [](MooncakeStorePyWrapper &self,
+                const std::vector<std::string> &keys,
+                const std::vector<std::string> &manifests,
+                const std::vector<uint32_t> &counts) {
+                 if (!self.is_client_initialized() || self.use_dummy_client_)
+                     throw std::runtime_error(
+                         "Multipart requires initialized RealClient");
+                 py::gil_scoped_release release;
+                 return std::make_shared<RangedReadSnapshotPy>(
+                     self.real_client_, keys, manifests, counts);
+             })
         .def(
             "prepare_get_into_ranges_snapshot",
             [](MooncakeStorePyWrapper &self,

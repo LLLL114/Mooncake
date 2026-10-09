@@ -416,6 +416,15 @@ class MasterService {
      *         ErrorCode::NO_AVAILABLE_HANDLE if allocation fails,
      *         ErrorCode::INVALID_PARAMS if slice size is invalid
      */
+    tl::expected<std::vector<Replica::Descriptor>, ErrorCode> PutPartStart(
+        const UUID& client_id, const PartPutRequest& request,
+        const TenantId& tenant_id);
+    tl::expected<void, ErrorCode> PutPartEnd(const UUID& client_id,
+                                             const PartEndRequest& request,
+                                             const TenantId& tenant_id);
+    tl::expected<PartQueryResponse, ErrorCode> QueryParts(
+        const std::string& key, const TenantId& tenant_id);
+
     auto PutStart(const UUID& client_id, const std::string& key,
                   const TenantId& tenant_id, const uint64_t slice_length,
                   const ReplicateConfig& config)

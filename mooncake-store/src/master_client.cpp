@@ -23,6 +23,21 @@ template <auto Method>
 struct RpcNameTraits;
 
 template <>
+struct RpcNameTraits<&WrappedMasterService::BatchQueryParts> {
+    static constexpr const char* value = "BatchQueryParts";
+};
+
+template <>
+struct RpcNameTraits<&WrappedMasterService::BatchPutPartEnd> {
+    static constexpr const char* value = "BatchPutPartEnd";
+};
+
+template <>
+struct RpcNameTraits<&WrappedMasterService::BatchPutPartStart> {
+    static constexpr const char* value = "BatchPutPartStart";
+};
+
+template <>
 struct RpcNameTraits<&WrappedMasterService::ExistKey> {
     static constexpr const char* value = "ExistKey";
 };
@@ -1414,6 +1429,26 @@ std::vector<tl::expected<void, ErrorCode>> MasterClient::BatchEvictDiskReplica(
             keys.size(), client_id_, keys, tenant_id, replica_type);
     timer.LogResponse("result=", result.size(), " operations");
     return result;
+}
+
+std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
+MasterClient::BatchPutPartStart(const std::vector<PartPutRequest>& requests) {
+    return invoke_batch_rpc<&WrappedMasterService::BatchPutPartStart,
+                            std::vector<Replica::Descriptor>>(
+        requests.size(), client_id_, requests, tenant_id_.value());
+}
+
+std::vector<tl::expected<void, ErrorCode>> MasterClient::BatchPutPartEnd(
+    const std::vector<PartEndRequest>& requests) {
+    return invoke_batch_rpc<&WrappedMasterService::BatchPutPartEnd, void>(
+        requests.size(), client_id_, requests, tenant_id_.value());
+}
+
+std::vector<tl::expected<PartQueryResponse, ErrorCode>>
+MasterClient::BatchQueryParts(const std::vector<std::string>& keys) {
+    return invoke_batch_rpc<&WrappedMasterService::BatchQueryParts,
+                            PartQueryResponse>(keys.size(), keys,
+                                               tenant_id_.value());
 }
 
 }  // namespace mooncake

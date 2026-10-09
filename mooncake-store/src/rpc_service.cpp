@@ -1757,6 +1757,12 @@ WrappedMasterService::RestoreFromBatchOpLogPromotion(
 void RegisterRpcService(
     coro_rpc::coro_rpc_server& server,
     mooncake::WrappedMasterService& wrapped_master_service) {
+    server.register_handler<&mooncake::WrappedMasterService::BatchPutPartStart>(
+        &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::BatchPutPartEnd>(
+        &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::BatchQueryParts>(
+        &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::ExistKey>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::BatchQueryIp>(
@@ -1904,6 +1910,47 @@ void RegisterRpcService(
     server
         .register_handler<&mooncake::WrappedMasterService::MarkTaskToComplete>(
             &wrapped_master_service);
+}
+
+std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
+WrappedMasterService::BatchPutPartStart(
+    const UUID& client_id, const std::vector<PartPutRequest>& requests,
+    const std::string& tenant_id) {
+    std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
+        results;
+    for (const auto& req : requests)
+        results.push_back(WithWriteTenant(
+            tenant_id, master_service_.IsTenantQuotaEnabled(),
+            [&](const TenantId& tenant) {
+                return master_service_.PutPartStart(client_id, req, tenant);
+            }));
+    return results;
+}
+
+std::vector<tl::expected<void, ErrorCode>>
+WrappedMasterService::BatchPutPartEnd(
+    const UUID& client_id, const std::vector<PartEndRequest>& requests,
+    const std::string& tenant_id) {
+    std::vector<tl::expected<void, ErrorCode>> results;
+    for (const auto& req : requests)
+        results.push_back(WithWriteTenant(
+            tenant_id, master_service_.IsTenantQuotaEnabled(),
+            [&](const TenantId& tenant) {
+                return master_service_.PutPartEnd(client_id, req, tenant);
+            }));
+    return results;
+}
+
+std::vector<tl::expected<PartQueryResponse, ErrorCode>>
+WrappedMasterService::BatchQueryParts(const std::vector<std::string>& keys,
+                                      const std::string& tenant_id) {
+    std::vector<tl::expected<PartQueryResponse, ErrorCode>> results;
+    for (const auto& key : keys)
+        results.push_back(
+            WithRequestTenant(tenant_id, [&](const TenantId& tenant) {
+                return master_service_.QueryParts(key, tenant);
+            }));
+    return results;
 }
 
 }  // namespace mooncake
