@@ -3955,13 +3955,13 @@ std::vector<std::shared_ptr<BufferHandle>> RealClient::batch_get_buffer(
 }
 
 tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
-    void *buffer, size_t size) {
+    void *buffer, size_t size, bool remote_accessible) {
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
     auto result = client_->RegisterLocalMemory(buffer, size, kWildcardLocation,
-                                               false, true);
+                                               remote_accessible, true);
     if (!result) {
         return result;
     }
@@ -3993,6 +3993,15 @@ tl::expected<void, ErrorCode> RealClient::unregister_buffer_internal(
         registered_buffer_sizes_.erase(buffer);
     }
     return {};
+}
+
+int RealClient::register_buffer_for_remote_access(void *buffer, size_t size) {
+    const auto &runtime =
+        device::GetAcceleratorRegistry().RuntimeAccelerators();
+    if (runtime.FindDeviceForPointer(buffer))
+        return to_py_ret(tl::expected<void, ErrorCode>{
+            tl::unexpected(ErrorCode::INVALID_PARAMS)});
+    return to_py_ret(register_buffer_internal(buffer, size, true));
 }
 
 int RealClient::unregister_buffer(void *buffer) {
@@ -8212,4 +8221,117 @@ tl::expected<ReturnType, ErrorCode> ClientRequester::invoke_rpc(
             co_return result->result();
         }());
 }
+
+std::vector<int> RealClient::batch_put_parts_from(
+    const std::vector<std::string> &keys, uint32_t part_index,
+    uint32_t part_count, const std::string &manifest_key,
+    const std::vector<std::vector<void *>> &buffers,
+    const std::vector<std::vector<size_t>> &sizes) {
+    std::vector<int> results(keys.size(), toInt(ErrorCode::INVALID_PARAMS));
+    if (!client_ || keys.size() > 100000 || buffers.size() != keys.size() ||
+        sizes.size() != keys.size())
+        return results;
+    std::vector<PartPutRequest> requests;
+    std::vector<std::vector<Slice>> slices;
+    std::vector<std::vector<uint64_t>> offsets;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (buffers[i].empty() || buffers[i].size() != sizes[i].size())
+            return results;
+        uint64_t length = 0;
+        std::vector<Slice> row;
+        std::vector<uint64_t> dst;
+        for (size_t j = 0; j < buffers[i].size(); ++j) {
+            auto region = resolve_writable_buffer_region(buffers[i][j]);
+            if (!region || sizes[i][j] == 0 ||
+                sizes[i][j] > region->size - region->offset ||
+                sizes[i][j] > kMaxSliceSize - length)
+                return results;
+            row.push_back({buffers[i][j], sizes[i][j]});
+            dst.push_back(length);
+            length += sizes[i][j];
+        }
+        requests.push_back(
+            {keys[i], part_index, part_count, manifest_key, length});
+        slices.push_back(std::move(row));
+        offsets.push_back(std::move(dst));
+    }
+    auto started = client_->StartParts(requests);
+    std::vector<size_t> active;
+    std::vector<std::vector<Replica::Descriptor>> replicas;
+    std::vector<std::vector<Slice>> active_slices;
+    std::vector<std::vector<uint64_t>> active_offsets;
+    for (size_t i = 0; i < started.size(); ++i) {
+        if (!started[i]) {
+            results[i] = toInt(started[i].error());
+            continue;
+        }
+        if (started[i]->empty()) {
+            results[i] = 0;
+            continue;
+        }
+        active.push_back(i);
+        replicas.push_back(std::move(*started[i]));
+        active_slices.push_back(std::move(slices[i]));
+        active_offsets.push_back(std::move(offsets[i]));
+    }
+    if (active.empty()) return results;
+    auto transferred = client_->BatchTransferWriteRanges(
+        replicas, active_slices, active_offsets);
+    std::vector<PartEndRequest> ends;
+    for (size_t j = 0; j < active.size(); ++j) {
+        std::vector<ReplicaID> ids;
+        for (const auto &replica : replicas[j]) ids.push_back(replica.id);
+        bool failed =
+            !transferred[j] ||
+            *transferred[j] != static_cast<int64_t>(requests[active[j]].length);
+        ends.push_back({keys[active[j]], part_index, std::move(ids), failed});
+    }
+    auto completed = client_->EndParts(ends);
+    for (size_t j = 0; j < active.size(); ++j) {
+        results[active[j]] = ends[j].revoke ? toInt(ErrorCode::TRANSFER_FAIL)
+                             : completed[j] ? 0
+                                            : toInt(completed[j].error());
+    }
+    return results;
+}
+
+PyClient::RangedReadSnapshot RealClient::prepare_parts_snapshot(
+    const std::vector<std::string> &keys,
+    const std::vector<std::string> &manifests,
+    const std::vector<uint32_t> &counts) {
+    if (keys.size() != manifests.size() || keys.size() != counts.size() ||
+        keys.size() > 100000)
+        throw std::invalid_argument("invalid multipart snapshot request");
+    auto now = std::chrono::steady_clock::now();
+    auto responses = client_->QueryParts(keys);
+    QueryResultCache cache;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (counts[i] == 0 || counts[i] > 1024)
+            throw std::invalid_argument("invalid part count");
+        bool matches = responses[i] &&
+                       responses[i]->manifest_key == manifests[i] &&
+                       responses[i]->parts.size() == counts[i];
+        for (size_t p = 0; p < counts[i]; ++p) {
+            // This is a snapshot-local address, never a Store object key.
+            auto alias = keys[i] + "\x1fp" + std::to_string(p);
+            if (matches) {
+                auto &part = responses[i]->parts[p];
+                cache.emplace(alias,
+                              QueryResult(std::move(part.replicas),
+                                          now + std::chrono::milliseconds(
+                                                    part.lease_ttl_ms),
+                                          part.object_checksum));
+            } else {
+                cache.emplace(
+                    alias,
+                    tl::make_unexpected(responses[i] ? ErrorCode::INVALID_PARAMS
+                                                     : responses[i].error()));
+            }
+        }
+    }
+    RangedReadSnapshot snapshot;
+    snapshot.reset(std::move(cache), now);
+    return snapshot;
+}
+
 }  // namespace mooncake

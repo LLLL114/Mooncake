@@ -21,6 +21,16 @@ namespace mooncake {
 class HttpMetadataServer;
 class WrappedMasterService {
    public:
+    std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
+    BatchPutPartStart(const UUID& client_id,
+                      const std::vector<PartPutRequest>& requests,
+                      const std::string& tenant_id = "default");
+    std::vector<tl::expected<void, ErrorCode>> BatchPutPartEnd(
+        const UUID& client_id, const std::vector<PartEndRequest>& requests,
+        const std::string& tenant_id = "default");
+    std::vector<tl::expected<PartQueryResponse, ErrorCode>> BatchQueryParts(
+        const std::vector<std::string>& keys,
+        const std::string& tenant_id = "default");
     void SetBatchOpLogTerminalCallback(
         OrderedOpLogWriter::TerminalCallback callback);
     void StopBatchOpLogWriter();

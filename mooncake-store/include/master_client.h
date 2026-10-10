@@ -91,6 +91,12 @@ inline RpcClientPool::PoolConfig MakeMasterRpcClientPoolConfig(
  */
 class MasterClient {
    public:
+    std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
+    BatchPutPartStart(const std::vector<PartPutRequest>& requests);
+    std::vector<tl::expected<void, ErrorCode>> BatchPutPartEnd(
+        const std::vector<PartEndRequest>& requests);
+    std::vector<tl::expected<PartQueryResponse, ErrorCode>> BatchQueryParts(
+        const std::vector<std::string>& keys);
     MasterClient(const UUID& client_id, MasterClientMetric* metrics = nullptr,
                  std::string tenant_id = "default")
         : client_accessor_(GetStoreRpcClientIoContextPool(),
