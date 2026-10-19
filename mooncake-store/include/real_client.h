@@ -1,5 +1,7 @@
 #pragma once
 
+#include <tuple>
+
 #include <atomic>
 #include <boost/lockfree/queue.hpp>
 #include <chrono>
@@ -78,6 +80,20 @@ class ResourceTracker {
 
 class RealClient : public PyClient {
    public:
+    std::vector<int> batch_put_parts_from(
+        const std::vector<std::string> &keys, uint32_t part_index,
+        uint32_t part_count, const std::string &manifest_key,
+        const std::vector<std::vector<void *>> &buffers,
+        const std::vector<std::vector<size_t>> &sizes);
+    std::vector<tl::expected<PartQueryResponse, ErrorCode>> query_parts(
+        const std::vector<std::string> &keys) {
+        return client_->QueryParts(keys);
+    }
+    RangedReadSnapshot prepare_parts_snapshot(
+        const std::vector<std::string> &keys,
+        const std::vector<std::string> &manifests,
+        const std::vector<uint32_t> &counts);
+
     RealClient();
     ~RealClient();
 
@@ -115,6 +131,9 @@ class RealClient : public PyClient {
             const ReplicateConfig &config = ReplicateConfig{});
 
     int register_buffer(void *buffer, size_t size);
+
+    // Explicit registration for owner-initiated RDMA writes into host memory.
+    int register_buffer_for_remote_access(void *buffer, size_t size);
 
     int unregister_buffer(void *buffer);
 
@@ -629,8 +648,8 @@ class RealClient : public PyClient {
         const std::shared_ptr<ClientBufferAllocator> &client_buffer_allocator =
             nullptr);
 
-    tl::expected<void, ErrorCode> register_buffer_internal(void *buffer,
-                                                           size_t size);
+    tl::expected<void, ErrorCode> register_buffer_internal(
+        void *buffer, size_t size, bool remote_accessible = false);
 
     struct RangedReadMetadata {
         QueryResult query_result;

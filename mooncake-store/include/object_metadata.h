@@ -99,7 +99,32 @@ struct ObjectMetadata {
     UUID client_id;
     // Updated by UpsertStart (Case B) to reset the discard timeout.
     std::chrono::system_clock::time_point put_start_time;
-    const size_t size;
+    size_t size;
+    // Experimental multipart objects retain the existing replica arena for
+    // lifecycle operations. A Part owns its replica IDs, never another key.
+    struct Part {
+        size_t length{0};
+        UUID writer{};
+        std::chrono::system_clock::time_point started{};
+        std::vector<ReplicaID> replica_ids;
+        bool Contains(ReplicaID id) const {
+            return std::find(replica_ids.begin(), replica_ids.end(), id) !=
+                   replica_ids.end();
+        }
+    };
+    std::vector<Part> parts;
+    std::string manifest_key;
+    bool IsMultipart() const { return !parts.empty(); }
+    bool PartsReadable(
+        const std::function<bool(const Replica&)>& readable) const {
+        return IsMultipart() &&
+               std::all_of(parts.begin(), parts.end(), [&](const Part& part) {
+                   return HasReplica([&](const Replica& r) {
+                       return part.Contains(r.id()) && readable(r);
+                   });
+               });
+    }
+
     std::optional<uint64_t> object_checksum;
     const ObjectDataType data_type{ObjectDataType::UNKNOWN};
     const std::string group_id;

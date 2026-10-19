@@ -322,4 +322,26 @@ struct BatchGetOffloadObjectResponse {
 YLT_REFL(BatchGetOffloadObjectResponse, batch_id, pointers,
          transfer_engine_addr, gc_ttl_ms);
 
+// Opt-in, memory-only multipart demo protocol. Layout is immutable per key.
+struct PartPutRequest {
+    std::string key;
+    uint32_t part_index{0};
+    uint32_t part_count{1};
+    std::string manifest_key;
+    uint64_t length{0};
+};
+YLT_REFL(PartPutRequest, key, part_index, part_count, manifest_key, length);
+struct PartEndRequest {
+    std::string key;
+    uint32_t part_index{0};
+    std::vector<ReplicaID> replica_ids;
+    bool revoke{false};
+};
+YLT_REFL(PartEndRequest, key, part_index, replica_ids, revoke);
+struct PartQueryResponse {
+    std::string manifest_key;
+    std::vector<GetReplicaListResponse> parts;
+};
+YLT_REFL(PartQueryResponse, manifest_key, parts);
+
 }  // namespace mooncake

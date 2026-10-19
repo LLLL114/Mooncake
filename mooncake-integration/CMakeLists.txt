@@ -1,6 +1,8 @@
 file(GLOB SOURCES "*.cpp")
 set(PYTHON_PACKAGE_NAME "mooncake")
-if(SKBUILD)
+if(DEFINED MOONCAKE_PYTHON_INSTALL_DIR)
+  # Honor the caller's explicit environment installation directory.
+elseif(SKBUILD)
   # scikit-build-core sets CMAKE_INSTALL_PREFIX to its private wheel tree. Keep
   # every Python artifact relative to that prefix.
   set(MOONCAKE_PYTHON_INSTALL_DIR "${PYTHON_PACKAGE_NAME}")
