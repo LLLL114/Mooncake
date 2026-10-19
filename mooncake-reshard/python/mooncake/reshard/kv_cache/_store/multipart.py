@@ -1,20 +1,23 @@
-"""Upload and restore KV pages using caller-supplied source manifests."""
+"""One immutable source layout per page object; no catalog or CAS publication."""
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any
 
 from ..placement import KVCachePlacementManifest
 from ..resolved import DEFAULT_TRANSFER_LIMITS
 from ..types import require_integer, require_manifest_items, require_nonempty_string
-from .backend import MultipartBackend
+from .backend import KVCacheStoreError, MultipartBackend
 from .binding import KVCacheStoreRuntimeBinding
 from .manifest import KVCacheStoreManifest
 from .page_reader import MultipartPageReader
 from .planner import DEFAULT_STORE_PLANNING_LIMITS, KVCacheStoreUploadPlan
 from .runtime import lower_store_ranges
+from .serde import kv_cache_store_manifest_from_json, kv_cache_store_manifest_to_json
 
 
 @dataclass(frozen=True)
@@ -40,7 +43,7 @@ class MultipartReadContext:
 
 
 class MultipartKVCacheStore:
-    """Execute KV transfers; the caller supplies immutable source manifests."""
+    """Memory-only multipart adapter. Manifests are immutable and hard pinned."""
 
     def __init__(
         self, native: Any, manifest: KVCacheStoreManifest, *, cache_capacity: int = 64
@@ -53,6 +56,14 @@ class MultipartKVCacheStore:
         self.planning_limits = DEFAULT_STORE_PLANNING_LIMITS
         self.transfer_limits = DEFAULT_TRANSFER_LIMITS
         self.cache_capacity = cache_capacity
+        self._manifests: OrderedDict[str, KVCacheStoreManifest] = OrderedDict()
+        self._lock = RLock()
+
+    def register_layout(self) -> None:
+        self.backend.publish_manifest(
+            self.manifest.manifest_key,
+            kv_cache_store_manifest_to_json(self.manifest).encode(),
+        )
 
     def prepare_page_reader(
         self,
@@ -60,6 +71,66 @@ class MultipartKVCacheStore:
         binding: KVCacheStoreRuntimeBinding,
     ) -> MultipartPageReader:
         return MultipartPageReader(self, placement, binding)
+
+    def discover(
+        self,
+        page_keys: Sequence[str],
+        *,
+        operation_id: str,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> MultipartReadContext:
+        page_keys = require_manifest_items(page_keys, "page_keys", str)
+        pages, ids, selected = [], [], {}
+        if cancelled is not None and cancelled():
+            return MultipartReadContext(
+                operation_id, self.manifest.model_domain, (), (), ()
+            )
+        # A key directly names the object and its source manifest. No directory
+        # scan, source-layout ranking, or cross-key completeness probe.
+        for start in range(0, len(page_keys), 128):
+            batch = page_keys[start : start + 128]
+            responses = self.backend.store.batch_query_parts(batch)
+            if len(responses) != len(batch):
+                raise KVCacheStoreError("multipart query result count differs")
+            for page, (status, ref, count) in zip(batch, responses):
+                if status != 0:
+                    return MultipartReadContext(
+                        operation_id,
+                        self.manifest.model_domain,
+                        tuple(pages),
+                        tuple(ids),
+                        tuple(selected.values()),
+                    )
+                with self._lock:
+                    manifest = self._manifests.get(ref)
+                    if manifest is None:
+                        manifest = kv_cache_store_manifest_from_json(
+                            self.backend.get_manifest(ref).decode()
+                        )
+                        if (
+                            manifest.manifest_key != ref
+                            or manifest.model_domain != self.manifest.model_domain
+                            or len(manifest.layout.shards) != count
+                        ):
+                            raise KVCacheStoreError(
+                                "object manifest identity or part count differs"
+                            )
+                        self._manifests[ref] = manifest
+                    self._manifests.move_to_end(ref)
+                    while len(self._manifests) > self.cache_capacity:
+                        self._manifests.popitem(last=False)
+                if len(manifest.layout.shards) != count:
+                    raise KVCacheStoreError("cached manifest part count differs")
+                pages.append(page)
+                ids.append(manifest.layout.layout_id)
+                selected[manifest.layout.layout_id] = manifest
+        return MultipartReadContext(
+            operation_id,
+            self.manifest.model_domain,
+            tuple(pages),
+            tuple(ids),
+            tuple(selected.values()),
+        )
 
     def upload(
         self,

@@ -12,6 +12,7 @@ from mooncake.reshard.kv_cache import (
     KVCacheStoreRuntimeBinding,
     plan_kv_cache_store_upload,
 )
+from mooncake.reshard.kv_cache._store.backend import MultipartBackend
 from test_kv_cache_reshard import _placement
 
 FORMATS = tuple(KVCacheStoreFormat)
@@ -63,10 +64,25 @@ def _reference(layout, layer_ids, head_start, head_count, component):
     return result
 
 
+class MemoryBackend(MultipartBackend):
+    def metadata_config(self):
+        return None
+
+
 class MemoryNative:
     def __init__(self):
+        self.values = {}
         self.parts = {}
-        self.range_reads = 0
+        self.queries = self.manifest_reads = self.metadata_puts = self.range_reads = 0
+
+    def put(self, key, value, config):
+        self.metadata_puts += 1
+        self.values.setdefault(key, value)
+        return 0
+
+    def get(self, key):
+        self.manifest_reads += 1
+        return self.values.get(key, b"")
 
     def batch_put_parts_from(self, keys, index, count, manifest, pointers, sizes):
         for key, ptrs, lengths in zip(keys, pointers, sizes):
@@ -75,6 +91,18 @@ class MemoryNative:
                 ctypes.string_at(p, n) for p, n in zip(ptrs, lengths)
             )
         return [0] * len(keys)
+
+    def batch_query_parts(self, keys):
+        self.queries += 1
+        result = []
+        for key in keys:
+            entry = self.parts.get(key)
+            result.append(
+                (0, entry[0], len(entry[1]))
+                if entry and all(v is not None for v in entry[1])
+                else (-1, "", 0)
+            )
+        return result
 
     def prepare_get_into_ranges_template(self, dst, src, sizes):
         return (dst, src, sizes)

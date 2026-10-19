@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 from _store_test_utils import (
     FORMATS,
+    MemoryBackend,
     MemoryNative,
     _manifest,
     memory_binding,
@@ -14,10 +15,15 @@ from mooncake.reshard.kv_cache import (
     KVCacheStoreFormat,
     KVCacheTransferLimits,
     MultipartKVCacheStore,
-    MultipartReadContext,
     plan_kv_cache_store_upload,
 )
+from mooncake.reshard.kv_cache._store.backend import MultipartBackend
 from test_kv_cache_reshard import _placement
+
+
+@pytest.fixture(autouse=True)
+def metadata_config(monkeypatch):
+    monkeypatch.setattr(MultipartBackend, "metadata_config", lambda self: None)
 
 
 def setup_page():
@@ -27,6 +33,7 @@ def setup_page():
     fmt = KVCacheStoreFormat.PLHD
     plan = plan_kv_cache_store_upload(source, object_format=fmt)
     writer = MultipartKVCacheStore(native, _manifest(plan.layout))
+    writer.register_layout()
     for part in source.parts:
         binding, keep, _ = memory_binding(source, part.participant_id, fmt, 1, "put")
         assert writer.upload(plan, ("page",), binding, operation_id="put") == (True,)
@@ -37,14 +44,7 @@ def setup_page():
     binding, buffers, expected = memory_binding(
         target, target.parts[0].participant_id, fmt, 1, "get", fill=False
     )
-    context = MultipartReadContext(
-        "get",
-        writer.manifest.model_domain,
-        ("page",),
-        (writer.manifest.layout.layout_id,),
-        (writer.manifest,),
-    )
-    return native, store, target, binding, buffers, expected, context
+    return native, store, target, binding, buffers, expected
 
 
 @pytest.mark.parametrize(
@@ -63,7 +63,8 @@ def test_cross_layout_restores_exact_bytes(source_format, target_format, source_
     source = _placement("source", ((0,), (1, 2), (3,)), source_tp)
     target = _placement("target", ((0, 1), (2, 3)), 2)
     plan = plan_kv_cache_store_upload(source, object_format=source_format)
-    writer = MultipartKVCacheStore(native, _manifest(plan.layout))
+    writer = MultipartKVCacheStore(MemoryBackend(native), _manifest(plan.layout))
+    writer.register_layout()
     for part in source.parts:
         if part.participant_id not in plan.part_writers:
             continue
@@ -73,7 +74,7 @@ def test_cross_layout_restores_exact_bytes(source_format, target_format, source_
         assert writer.upload(plan, ("page",), binding, operation_id="put") == (True,)
         assert keep
     reader = MultipartKVCacheStore(
-        native,
+        MemoryBackend(native),
         _manifest(
             plan_kv_cache_store_upload(target, object_format=target_format).layout
         ),
@@ -81,13 +82,8 @@ def test_cross_layout_restores_exact_bytes(source_format, target_format, source_
     reader.transfer_limits = KVCacheTransferLimits(
         max_batch_operations=7, max_batch_bytes=173
     )
-    context = MultipartReadContext(
-        "get",
-        writer.manifest.model_domain,
-        ("page",),
-        (writer.manifest.layout.layout_id,),
-        (writer.manifest,),
-    )
+    reader.register_layout()
+    context = reader.discover(("page", "missing"), operation_id="get")
     assert context.page_keys == ("page",)
     assert context.manifests[0].layout.object_format == source_format
     for part in target.parts:
@@ -105,11 +101,10 @@ def test_mixed_layout_pages_bind_independent_manifest_references():
     native = MemoryNative()
     placement = _placement("source", ((0, 1), (2, 3)), 2)
     pages = tuple("page-" + fmt.value for fmt in FORMATS)
-    manifests = []
     for fmt, page in zip(FORMATS, pages):
         plan = plan_kv_cache_store_upload(placement, object_format=fmt)
-        writer = MultipartKVCacheStore(native, _manifest(plan.layout))
-        manifests.append(writer.manifest)
+        writer = MultipartKVCacheStore(MemoryBackend(native), _manifest(plan.layout))
+        writer.register_layout()
         for part in placement.parts:
             binding, keep, _ = memory_binding(
                 placement, part.participant_id, fmt, 1, "put", page_salts=(0,)
@@ -118,16 +113,10 @@ def test_mixed_layout_pages_bind_independent_manifest_references():
             assert keep
     for fmt in FORMATS:
         reader = MultipartKVCacheStore(
-            native,
+            MemoryBackend(native),
             _manifest(plan_kv_cache_store_upload(placement, object_format=fmt).layout),
         )
-        context = MultipartReadContext(
-            "get",
-            reader.manifest.model_domain,
-            pages,
-            tuple(m.layout.layout_id for m in manifests),
-            tuple(manifests),
-        )
+        context = reader.discover(pages, operation_id="get")
         assert len(set(context.layout_ids)) == 3
         for part in placement.parts:
             binding, buffers, expected = memory_binding(
@@ -159,26 +148,31 @@ def test_mixed_layout_pages_bind_independent_manifest_references():
             assert len(page_reader._templates) == 3
 
 
-def test_geometry_cache_is_local_and_immutable(monkeypatch):
-    _native, store, target, binding, buffers, expected, context = setup_page()
+def test_manifest_and_geometry_cache_are_local_and_immutable(monkeypatch):
+    native, store, target, binding, buffers, expected = setup_page()
+    context = store.discover(("page", "missing"), operation_id="get")
     assert context.page_keys == ("page",)
+    assert len(store._manifests) == 1
     reader = store.prepare_page_reader(target, binding)
     offsets = [{key: 0 for key in reader.regions}]
     assert reader.load(context, offsets) == 1
     assert [bytes(b) for b in buffers] == expected
+    reads = native.manifest_reads
 
     def forbidden(*args):
-        raise AssertionError("cached template should not be rebuilt")
+        raise AssertionError("cached manifest/template should not be rebuilt")
 
     monkeypatch.setattr(reader, "_compile", forbidden)
-    assert reader.load(replace(context, operation_id="again"), offsets) == 1
+    assert reader.load(store.discover(("page",), operation_id="again"), offsets) == 1
+    assert native.manifest_reads == reads
 
 
 def test_reader_honors_range_limits_and_cancellation():
-    native, store, target, binding, buffers, expected, context = setup_page()
+    native, store, target, binding, buffers, expected = setup_page()
     store.transfer_limits = KVCacheTransferLimits(
         max_batch_operations=2, max_batch_bytes=137
     )
+    context = store.discover(("page",), operation_id="get")
     reader = store.prepare_page_reader(target, binding)
     offsets = [{key: 0 for key in reader.regions}]
     assert reader.load(context, offsets, cancelled=lambda: True) == 0
@@ -193,3 +187,14 @@ def test_reader_honors_range_limits_and_cancellation():
     native.get_into_ranges_from_template = lambda *a, **kw: []
     with pytest.raises(KVCacheStoreError, match="shape"):
         reader.load(context, offsets)
+
+
+def test_manifest_digest_is_checked_before_planning():
+    native, store, _, _, _, _ = setup_page()
+    ref, _ = native.parts["page"]
+    data = native.values[ref].decode()
+    native.values[ref] = data.replace(
+        '"model_id":"model"', '"model_id":"wrong"'
+    ).encode()
+    with pytest.raises(ValueError, match="domain"):
+        store.discover(("page",), operation_id="get")

@@ -17,7 +17,6 @@ from mooncake.reshard.kv_cache import (
     KVCacheStoreFormat,
     KVCacheTransferLimits,
     MultipartKVCacheStore,
-    MultipartReadContext,
     plan_kv_cache_store_upload,
 )
 from test_kv_cache_reshard import _placement
@@ -165,6 +164,7 @@ def test_native_tp1pp3_to_tp2pp2_restore(cluster, fmt, target_fmt):
     writer = MultipartKVCacheStore(raw, _manifest(plan.layout))
     keys = (uuid.uuid4().hex,)
     try:
+        writer.register_layout()
         for part in placement.parts:
             with _bound(raw, placement, part.participant_id, fmt, 1, "upload") as (
                 binding,
@@ -181,13 +181,7 @@ def test_native_tp1pp3_to_tp2pp2_restore(cluster, fmt, target_fmt):
             ),
         )
         reader.transfer_limits = KVCacheTransferLimits(max_batch_operations=2)
-        context = MultipartReadContext(
-            "read",
-            writer.manifest.model_domain,
-            keys,
-            (writer.manifest.layout.layout_id,),
-            (writer.manifest,),
-        )
+        context = reader.discover(keys, operation_id="read")
         assert context.page_keys == keys
         for part in target.parts:
             with _bound(
@@ -212,6 +206,7 @@ def _upload_in_child(addresses, key):
     plan = plan_kv_cache_store_upload(source, object_format=fmt)
     writer = MultipartKVCacheStore(raw, _manifest(plan.layout))
     try:
+        writer.register_layout()
         for part in source.parts:
             with _bound(raw, source, part.participant_id, fmt, 1, "put") as (
                 binding,
@@ -248,17 +243,7 @@ def test_native_store_survives_uploader_process_exit(cluster):
         raw, _manifest(plan_kv_cache_store_upload(target, object_format=fmt).layout)
     )
     try:
-        source = _placement("source", ((0,), (1, 2)), 1)
-        manifest = _manifest(
-            plan_kv_cache_store_upload(source, object_format=fmt).layout
-        )
-        context = MultipartReadContext(
-            "get",
-            manifest.model_domain,
-            (key,),
-            (manifest.layout.layout_id,),
-            (manifest,),
-        )
+        context = reader.discover((key,), operation_id="get")
         assert context.page_keys == (key,)
         for part in target.parts:
             with _bound(
