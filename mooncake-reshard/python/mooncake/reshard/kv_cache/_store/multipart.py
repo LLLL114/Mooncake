@@ -11,13 +11,13 @@ from typing import Any
 from ..placement import KVCachePlacementManifest
 from ..resolved import DEFAULT_TRANSFER_LIMITS
 from ..types import require_integer, require_manifest_items, require_nonempty_string
-from .backend import KVCacheStoreError, MultipartBackend
+from .backend import KVCacheStoreError, MultipartBackend, manifest_metadata
 from .binding import KVCacheStoreRuntimeBinding
 from .manifest import KVCacheStoreManifest
 from .page_reader import MultipartPageReader
 from .planner import DEFAULT_STORE_PLANNING_LIMITS, KVCacheStoreUploadPlan
 from .runtime import lower_store_ranges
-from .serde import kv_cache_store_manifest_from_json, kv_cache_store_manifest_to_json
+from .serde import kv_cache_store_manifest_from_json
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class MultipartReadContext:
 
 
 class MultipartKVCacheStore:
-    """Memory-only multipart adapter. Manifests are immutable and hard pinned."""
+    """Memory-only adapter with an immutable manifest embedded in each page."""
 
     def __init__(
         self, native: Any, manifest: KVCacheStoreManifest, *, cache_capacity: int = 64
@@ -53,17 +53,12 @@ class MultipartKVCacheStore:
             native if isinstance(native, MultipartBackend) else MultipartBackend(native)
         )
         self.manifest = manifest
+        self.object_metadata = manifest_metadata(manifest)
         self.planning_limits = DEFAULT_STORE_PLANNING_LIMITS
         self.transfer_limits = DEFAULT_TRANSFER_LIMITS
         self.cache_capacity = cache_capacity
         self._manifests: OrderedDict[str, KVCacheStoreManifest] = OrderedDict()
         self._lock = RLock()
-
-    def register_layout(self) -> None:
-        self.backend.publish_manifest(
-            self.manifest.manifest_key,
-            kv_cache_store_manifest_to_json(self.manifest).encode(),
-        )
 
     def prepare_page_reader(
         self,
@@ -92,7 +87,7 @@ class MultipartKVCacheStore:
             responses = self.backend.store.batch_query_parts(batch)
             if len(responses) != len(batch):
                 raise KVCacheStoreError("multipart query result count differs")
-            for page, (status, ref, count) in zip(batch, responses):
+            for page, (status, metadata, count) in zip(batch, responses):
                 if status != 0:
                     return MultipartReadContext(
                         operation_id,
@@ -101,14 +96,19 @@ class MultipartKVCacheStore:
                         tuple(ids),
                         tuple(selected.values()),
                     )
+                boundary = metadata.find("\n")
+                if boundary <= 0 or boundary == len(metadata) - 1:
+                    raise KVCacheStoreError("object lacks an inline manifest")
+                ref = metadata[:boundary]
                 with self._lock:
                     manifest = self._manifests.get(ref)
                     if manifest is None:
                         manifest = kv_cache_store_manifest_from_json(
-                            self.backend.get_manifest(ref).decode()
+                            metadata[boundary + 1 :]
                         )
                         if (
                             manifest.manifest_key != ref
+                            or manifest_metadata(manifest) != metadata
                             or manifest.model_domain != self.manifest.model_domain
                             or len(manifest.layout.shards) != count
                         ):
@@ -184,7 +184,7 @@ class MultipartKVCacheStore:
             page_keys,
             owned[0],
             len(plan.layout.shards),
-            self.manifest.manifest_key,
+            self.object_metadata,
             pointers,
             lengths,
         )

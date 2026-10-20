@@ -1,17 +1,29 @@
-"""Native multipart reads and immutable manifest publication."""
+"""Native multipart reads with self-contained manifest metadata."""
 
 from __future__ import annotations
 
-import logging
-import time
-from importlib import import_module
-from typing import Any
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any
 
-logger = logging.getLogger(__name__)
+from .manifest import KVCacheStoreManifest
+from .serde import kv_cache_store_manifest_to_json
+
+if TYPE_CHECKING:
+    from .multipart import MultipartReadContext
 
 
 class KVCacheStoreError(RuntimeError):
     """A native operation or metadata protocol failed."""
+
+
+@lru_cache(maxsize=64)
+def manifest_metadata(manifest: KVCacheStoreManifest) -> str:
+    """Encode a cache identity and canonical JSON, without publishing an object.
+
+    The native demo treats ObjectMetadata.manifest_key as opaque text.
+    Cache serialization of immutable manifests for repeated read snapshots.
+    """
+    return manifest.manifest_key + "\n" + kv_cache_store_manifest_to_json(manifest)
 
 
 class MultipartBackend:
@@ -29,8 +41,9 @@ class MultipartBackend:
                     f"native Store lacks multipart capability: {name}"
                 )
 
-    def ranged_reader(self, context):
+    def ranged_reader(self, context: MultipartReadContext):
         manifests = {m.layout.layout_id: m for m in context.manifests}
+        metadata = {key: manifest_metadata(m) for key, m in manifests.items()}
         sources = [manifests[i] for i in context.layout_ids]
         snapshot = None
 
@@ -39,41 +52,9 @@ class MultipartBackend:
             if snapshot is None:
                 snapshot = self.store.prepare_get_parts_snapshot(
                     context.page_keys,
-                    [m.manifest_key for m in sources],
+                    [metadata[i] for i in context.layout_ids],
                     [len(m.layout.shards) for m in sources],
                 )
             return self.store.get_into_ranges_from_template(snapshot, *args, **kwargs)
 
         return read
-
-    def metadata_config(self) -> Any:
-        module = import_module("mooncake.store")
-        config: Any = module.ReplicateConfig()
-        config.data_type = module.ObjectDataType.METADATA
-        config.with_hard_pin = True
-        return config
-
-    def get_manifest(self, key: str) -> bytes:
-        value = self.store.get(key)
-        if type(value) is not bytes or not value or len(value) > 16 * 1024 * 1024:
-            raise KVCacheStoreError("manifest is missing or exceeds its size bound")
-        return value
-
-    def publish_manifest(self, key: str, value: bytes, attempts: int = 8) -> None:
-        for attempt in range(attempts):
-            try:
-                self.store.put(key, value, self.metadata_config())
-            except (RuntimeError, OSError) as error:
-                logger.debug("Manifest put failed; checking publication: %s", error)
-            try:
-                observed = self.get_manifest(key)
-            except KVCacheStoreError:
-                if attempt + 1 == attempts:
-                    raise
-                time.sleep(min(0.001 * 2**attempt, 0.02))
-                continue
-            if observed != value:
-                raise KVCacheStoreError(
-                    "published manifest differs from expected content"
-                )
-            return

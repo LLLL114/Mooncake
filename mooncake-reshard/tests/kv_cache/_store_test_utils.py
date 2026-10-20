@@ -12,7 +12,6 @@ from mooncake.reshard.kv_cache import (
     KVCacheStoreRuntimeBinding,
     plan_kv_cache_store_upload,
 )
-from mooncake.reshard.kv_cache._store.backend import MultipartBackend
 from test_kv_cache_reshard import _placement
 
 FORMATS = tuple(KVCacheStoreFormat)
@@ -64,25 +63,10 @@ def _reference(layout, layer_ids, head_start, head_count, component):
     return result
 
 
-class MemoryBackend(MultipartBackend):
-    def metadata_config(self):
-        return None
-
-
 class MemoryNative:
     def __init__(self):
-        self.values = {}
         self.parts = {}
-        self.queries = self.manifest_reads = self.metadata_puts = self.range_reads = 0
-
-    def put(self, key, value, config):
-        self.metadata_puts += 1
-        self.values.setdefault(key, value)
-        return 0
-
-    def get(self, key):
-        self.manifest_reads += 1
-        return self.values.get(key, b"")
+        self.queries = self.range_reads = 0
 
     def batch_put_parts_from(self, keys, index, count, manifest, pointers, sizes):
         for key, ptrs, lengths in zip(keys, pointers, sizes):

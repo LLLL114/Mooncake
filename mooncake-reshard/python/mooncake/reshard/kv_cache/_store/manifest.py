@@ -213,8 +213,8 @@ def _validate_layout_coverage(layout: KVCacheStoreLayout) -> None:
 class KVCacheStoreManifest:
     """One immutable layout record shared by pages stored in that layout.
 
-    Constructing it does not publish a layout or prove any payload exists.
-    The page ObjectMetadata binds manifest_key at its first Part write.
+    Constructing it does not prove any payload exists. The first Part write
+    binds its cache identity and serialized content to page ObjectMetadata.
     """
 
     namespace: str
@@ -258,7 +258,7 @@ def _layout_digest(layout_id: str) -> str:
 
 
 def _manifest_key(model_domain: str, layout_id: str) -> str:
-    """Content-addressed manifest location shared by all pages of a layout."""
+    """Stable manifest cache identity shared by all pages of a layout."""
     require_sha256(model_domain, "model_domain")
     return f"kv/{model_domain}/manifests/{_layout_digest(layout_id)}"
 

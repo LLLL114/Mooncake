@@ -164,7 +164,6 @@ def test_native_tp1pp3_to_tp2pp2_restore(cluster, fmt, target_fmt):
     writer = MultipartKVCacheStore(raw, _manifest(plan.layout))
     keys = (uuid.uuid4().hex,)
     try:
-        writer.register_layout()
         for part in placement.parts:
             with _bound(raw, placement, part.participant_id, fmt, 1, "upload") as (
                 binding,
@@ -206,7 +205,6 @@ def _upload_in_child(addresses, key):
     plan = plan_kv_cache_store_upload(source, object_format=fmt)
     writer = MultipartKVCacheStore(raw, _manifest(plan.layout))
     try:
-        writer.register_layout()
         for part in source.parts:
             with _bound(raw, source, part.participant_id, fmt, 1, "put") as (
                 binding,
